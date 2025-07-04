@@ -43,7 +43,7 @@ use n0_future::{
     time::{self, Duration},
 };
 use n0_watcher::{Watchable, Watcher as _};
-use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
+use swarm_discovery::{Discoverer, DropGuard, InterfaceSelection, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info_span, trace, warn, Instrument};
 
@@ -343,7 +343,8 @@ impl MdnsDiscovery {
             .to_ascii_lowercase();
         let mut discoverer = Discoverer::new_interactive(N0_LOCAL_SWARM.to_string(), node_id_str)
             .with_callback(callback)
-            .with_ip_class(IpClass::Auto);
+            .with_ip_class(IpClass::Auto)
+            .with_multicast_interfaces(InterfaceSelection::All);
         for addr in addrs {
             discoverer = discoverer.with_addrs(addr.0, addr.1);
         }

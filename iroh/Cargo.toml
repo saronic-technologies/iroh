@@ -88,7 +88,8 @@ spki = { version = "0.7.3", features = ["std"] }
 iroh-metrics = { version = "0.35", default-features = false }
 
 # local-swarm-discovery
-swarm-discovery = { version = "0.4", optional = true }
+# swarm-discovery = { version = "0.4", optional = true }
+swarm-discovery = { git = "https://github.com/therishidesai/swarm-discovery.git", branch = "rdesai/feat/multi-interface", optional = true }
 futures-util = "0.3"
 
 # test_utils
