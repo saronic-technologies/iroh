@@ -4,15 +4,14 @@ version = 4
 
 [[package]]
 name = "acto"
-version = "0.8.0"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "148541f13c28e3e840354ee4d6c99046c10be2c81068bbd23b9e3a38f95a917e"
+checksum = "a026259da4f1a13b4af60cda453c392de64c58c12d239c560923e0382f42f2b9"
 dependencies = [
  "parking_lot",
  "pin-project-lite",
  "rustc_version",
  "smol_str",
- "sync_wrapper",
  "tokio",
  "tracing",
 ]
@@ -1998,6 +1997,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf39cc0423ee66021dc5eccface85580e4a001e0c5288bae8bea7ecb69225e90"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "igd-next"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2103,6 +2112,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hickory-resolver",
  "http",
+ "if-addrs",
  "igd-next",
  "indicatif",
  "iroh-base",
@@ -4375,14 +4385,13 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-discovery"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a5ab62937edac8b23fa40e55a358ea1924245b17fc1eb20d14929c8f11be98d"
+version = "0.4.0"
+source = "git+https://github.com/therishidesai/swarm-discovery.git?branch=rdesai%2Ffeat%2Fmulti-interface#6bc3572899cfb834cd57239146eb3d9d1b0f6aca"
 dependencies = [
  "acto",
  "hickory-proto",
  "rand",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

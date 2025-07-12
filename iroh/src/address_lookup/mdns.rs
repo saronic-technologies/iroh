@@ -62,12 +62,13 @@
 //! [`AddrFilter`]: crate::address_lookup::AddrFilter
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::Arc,
 };
 
+use if_addrs::get_if_addrs;
 use iroh_base::{EndpointId, PublicKey};
 use n0_future::{
     Stream,
@@ -115,6 +116,8 @@ const RELAY_URL_ATTRIBUTE: &str = "relay";
 pub struct MdnsAddressLookup {
     #[allow(dead_code)]
     handle: Arc<AbortOnDropHandle<()>>,
+    #[allow(dead_code)]
+    monitor_handle: Arc<AbortOnDropHandle<()>>,
     sender: mpsc::Sender<Message>,
     advertise: bool,
     /// When `local_addrs` changes, we re-publish our info.
@@ -278,7 +281,7 @@ impl MdnsAddressLookup {
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let address_lookup = MdnsAddressLookup::spawn_discoverer(
+        let (address_lookup, monitor_handle) = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
             advertise,
             task_sender.clone(),
@@ -450,6 +453,7 @@ impl MdnsAddressLookup {
             task::spawn(address_lookup_fut.instrument(info_span!("swarm-discovery.actor")));
         Ok(Self {
             handle: Arc::new(AbortOnDropHandle::new(handle)),
+            monitor_handle: Arc::new(monitor_handle),
             sender: send,
             advertise,
             local_addrs,
@@ -474,7 +478,7 @@ impl MdnsAddressLookup {
         socketaddrs: BTreeSet<SocketAddr>,
         service_name: String,
         rt: &tokio::runtime::Handle,
-    ) -> Result<DropGuard, AddressLookupBuilderError> {
+    ) -> Result<(Arc<DropGuard>, AbortOnDropHandle<()>), AddressLookupBuilderError> {
         let spawn_rt = rt.clone();
         let callback = move |endpoint_id: &str, peer: &Peer| {
             trace!(endpoint_id, ?peer, "Received peer information from Mdns");
@@ -492,8 +496,16 @@ impl MdnsAddressLookup {
         let endpoint_id_str = data_encoding::BASE32_NOPAD
             .encode(endpoint_id.as_bytes())
             .to_ascii_lowercase();
+        // Get initial local IPs for multicast
+        let initial_ips: Vec<std::net::IpAddr> = get_if_addrs()
+            .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))?
+            .into_iter()
+            .filter(|iface| !iface.is_loopback())
+            .map(|iface| iface.addr.ip())
+            .collect();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
             .with_callback(callback)
+            .with_multicast_interfaces(initial_ips.clone())
             .with_ip_class(IpClass::Auto);
         if advertise {
             let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
@@ -501,9 +513,46 @@ impl MdnsAddressLookup {
                 discoverer = discoverer.with_addrs(addr.0, addr.1);
             }
         }
-        discoverer
-            .spawn(rt)
-            .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))
+
+        let guard = Arc::new(discoverer.spawn(rt).map_err(|e| AddressLookupBuilderError::from_err("mdns", e))?);
+        let guard_clone = guard.clone();
+        let mut known_interfaces: HashSet<std::net::IpAddr> = initial_ips.into_iter().collect();
+        
+        let monitor_handle = tokio::task::spawn(async move {
+            loop {
+                time::sleep(Duration::from_secs(5)).await;
+
+                // Get current network interfaces
+                let current_interfaces: HashSet<std::net::IpAddr> = match get_if_addrs() {
+                    Ok(addrs) => addrs
+                        .into_iter()
+                        .filter(|iface| !iface.is_loopback())
+                        .map(|iface| iface.addr.ip())
+                        .filter(|ip| ip.is_ipv4()) // Only monitor IPv4 interfaces
+                        .collect(),
+                    Err(e) => {
+                        tracing::debug!("Failed to get interfaces: {}", e);
+                        continue;
+                    }
+                };
+
+                // Check for new interfaces
+                for new_if in current_interfaces.difference(&known_interfaces) {
+                    tracing::debug!("New interface detected: {} - adding to multicast", new_if);
+                    guard_clone.add_interface(*new_if);
+                }
+
+                // Check for removed interfaces
+                for old_if in known_interfaces.difference(&current_interfaces) {
+                    tracing::debug!("Interface removed: {} - removing from multicast", old_if);
+                    guard_clone.remove_interface(*old_if);
+                }
+
+                known_interfaces = current_interfaces;
+            }
+        });
+
+        Ok((guard, AbortOnDropHandle::new(monitor_handle)))
     }
 
     fn socketaddrs_to_addrs<'a>(

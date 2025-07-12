@@ -68,13 +68,16 @@ pkcs8 = "0.11.0-rc.9"
 # metrics
 iroh-metrics = { version = "0.38", default-features = false }
 
-# mdns
-swarm-discovery = { version = "0.5", optional = true }
+# local-swarm-discovery
+# swarm-discovery = { version = "0.3.1", optional = true }
+swarm-discovery = { git = "https://github.com/therishidesai/swarm-discovery.git", branch = "rdesai/feat/multi-interface", optional = true }
 futures-util = "0.3"
 
 # test_utils
 axum = { version = "0.8", optional = true }
 sync_wrapper = { version = "1.0.2", features = ["futures"] }
+
+if-addrs = "0.14.0"
 
 # non-wasm-in-browser dependencies
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
