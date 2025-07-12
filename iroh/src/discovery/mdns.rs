@@ -37,11 +37,16 @@ use std::{
 
 use anyhow::Result;
 use derive_more::FromStr;
+use if_addrs::get_if_addrs;
 use iroh_base::{NodeId, PublicKey};
 use n0_future::{
     boxed::BoxStream,
     task::{self, AbortOnDropHandle, JoinSet},
     time::{self, Duration},
+};
+use std::{
+    collections::HashSet,
+    sync::Arc
 };
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
@@ -306,7 +311,7 @@ impl MdnsDiscovery {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         rt: &tokio::runtime::Handle,
-    ) -> Result<DropGuard> {
+    ) -> Result<Arc<DropGuard>> {
         let spawn_rt = rt.clone();
         let callback = move |node_id: &str, peer: &Peer| {
             trace!(
@@ -326,13 +331,59 @@ impl MdnsDiscovery {
         let node_id_str = data_encoding::BASE32_NOPAD
             .encode(node_id.as_bytes())
             .to_ascii_lowercase();
+        // Get initial local IPs for multicast
+        let initial_ips: Vec<std::net::IpAddr> = get_if_addrs()
+            .expect("get_if_addrs")
+            .into_iter()
+            .filter(|iface| !iface.is_loopback())
+            .map(|iface| iface.addr.ip())
+            .collect();
         let mut discoverer = Discoverer::new_interactive(N0_LOCAL_SWARM.to_string(), node_id_str)
             .with_callback(callback)
+            .with_multicast_interfaces(initial_ips.clone())
             .with_ip_class(IpClass::Auto);
         for addr in addrs {
             discoverer = discoverer.with_addrs(addr.0, addr.1);
         }
-        discoverer.spawn(rt)
+
+        let guard = Arc::new(discoverer.spawn(rt)?);
+        let guard_clone = guard.clone();
+        let mut known_interfaces: HashSet<std::net::IpAddr> = initial_ips.into_iter().collect();
+        tokio::task::spawn(async move {
+            loop {
+                time::sleep(Duration::from_secs(5)).await;
+                
+                // Get current network interfaces
+                let current_interfaces: HashSet<std::net::IpAddr> = match get_if_addrs() {
+                    Ok(addrs) => addrs
+                        .into_iter()
+                        .filter(|iface| !iface.is_loopback())
+                        .map(|iface| iface.addr.ip())
+                        .filter(|ip| ip.is_ipv4()) // Only monitor IPv4 interfaces
+                        .collect(),
+                    Err(e) => {
+                        tracing::debug!("Failed to get interfaces: {}", e);
+                        continue;
+                    }
+                };
+                
+                // Check for new interfaces
+                for new_if in current_interfaces.difference(&known_interfaces) {
+                    tracing::debug!("📡 New interface detected: {} - adding to multicast", new_if);
+                    guard_clone.add_interface(*new_if);
+                }
+                
+                // Check for removed interfaces
+                for old_if in known_interfaces.difference(&current_interfaces) {
+                    tracing::debug!("❌ Interface removed: {} - removing from multicast", old_if);
+                    guard_clone.remove_interface(*old_if);
+                }
+                
+                known_interfaces = current_interfaces;
+            }
+        });
+
+        Ok(guard)
     }
 
     fn socketaddrs_to_addrs(socketaddrs: &BTreeSet<SocketAddr>) -> HashMap<u16, Vec<IpAddr>> {
