@@ -54,7 +54,7 @@ toml = "0.8.10"
 tower-http = { version = "0.6.1", features = ["cors", "trace"] }
 tower_governor = "0.7"
 tracing = "0.1"
-tracing-subscriber = "0.3.18"
+tracing-subscriber = "0.3.20"
 ttl_cache = "0.5.1"
 url = "2.5.3"
 z32 = "1.1.1"
