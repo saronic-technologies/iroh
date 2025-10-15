@@ -31,11 +31,13 @@
 //! }
 //! ```
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
+    sync::Arc,
 };
 
 use derive_more::FromStr;
+use if_addrs::get_if_addrs;
 use iroh_base::{NodeId, PublicKey};
 use n0_future::{
     boxed::BoxStream,
@@ -43,7 +45,7 @@ use n0_future::{
     time::{self, Duration},
 };
 use n0_watcher::{Watchable, Watcher as _};
-use swarm_discovery::{Discoverer, DropGuard, InterfaceSelection, IpClass, Peer};
+use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info_span, trace, warn, Instrument};
 
@@ -321,7 +323,7 @@ impl MdnsDiscovery {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         rt: &tokio::runtime::Handle,
-    ) -> Result<DropGuard, IntoDiscoveryError> {
+    ) -> Result<Arc<DropGuard>, IntoDiscoveryError> {
         let spawn_rt = rt.clone();
         let callback = move |node_id: &str, peer: &Peer| {
             trace!(
@@ -337,6 +339,21 @@ impl MdnsDiscovery {
                 sender.send(Message::Discovery(node_id, peer)).await.ok();
             });
         };
+
+        // Get initial local IPs for multicast
+        let initial_ips: Vec<std::net::Ipv4Addr> = get_if_addrs()
+            .map_err(|e| IntoDiscoveryError::from_err("mdns", e))?
+            .into_iter()
+            .filter(|iface| !iface.is_loopback())
+            .map(|iface| iface.addr.ip())
+            .filter_map(|ip| match ip {
+                std::net::IpAddr::V4(ipv4) => Some(ipv4),
+                std::net::IpAddr::V6(_) => None,
+            })
+            .collect();
+
+        debug!("Initial multicast interfaces: {:?}", initial_ips);
+
         let addrs = MdnsDiscovery::socketaddrs_to_addrs(&socketaddrs);
         let node_id_str = data_encoding::BASE32_NOPAD
             .encode(node_id.as_bytes())
@@ -344,13 +361,62 @@ impl MdnsDiscovery {
         let mut discoverer = Discoverer::new_interactive(N0_LOCAL_SWARM.to_string(), node_id_str)
             .with_callback(callback)
             .with_ip_class(IpClass::Auto)
-            .with_multicast_interfaces(InterfaceSelection::All);
+            .with_multicast_interfaces_v4(initial_ips.clone());
+
         for addr in addrs {
             discoverer = discoverer.with_addrs(addr.0, addr.1);
         }
-        discoverer
-            .spawn(rt)
-            .map_err(|e| IntoDiscoveryError::from_err("mdns", e))
+
+        let guard = Arc::new(
+            discoverer
+                .spawn(rt)
+                .map_err(|e| IntoDiscoveryError::from_err("mdns", e))?,
+        );
+
+        // Spawn interface monitoring task
+        let guard_clone = guard.clone();
+        let mut known_interfaces: HashSet<std::net::Ipv4Addr> = initial_ips.into_iter().collect();
+
+        rt.spawn(async move {
+            debug!("Starting interface monitor (checking every 5 seconds)...");
+
+            loop {
+                time::sleep(Duration::from_secs(5)).await;
+
+                // Get current network interfaces
+                let current_interfaces: HashSet<std::net::Ipv4Addr> = match get_if_addrs() {
+                    Ok(addrs) => addrs
+                        .into_iter()
+                        .filter(|iface| !iface.is_loopback())
+                        .map(|iface| iface.addr.ip())
+                        .filter_map(|ip| match ip {
+                            std::net::IpAddr::V4(ipv4) => Some(ipv4),
+                            std::net::IpAddr::V6(_) => None,
+                        })
+                        .collect(),
+                    Err(e) => {
+                        warn!("Failed to get interfaces: {}", e);
+                        continue;
+                    }
+                };
+
+                // Check for new interfaces
+                for new_if in current_interfaces.difference(&known_interfaces) {
+                    debug!("New interface detected: {} - adding to multicast", new_if);
+                    guard_clone.add_interface_v4(*new_if);
+                }
+
+                // Check for removed interfaces
+                for old_if in known_interfaces.difference(&current_interfaces) {
+                    debug!("Interface removed: {} - removing from multicast", old_if);
+                    guard_clone.remove_interface_v4(*old_if);
+                }
+
+                known_interfaces = current_interfaces;
+            }
+        });
+
+        Ok(guard)
     }
 
     fn socketaddrs_to_addrs(socketaddrs: &BTreeSet<SocketAddr>) -> HashMap<u16, Vec<IpAddr>> {

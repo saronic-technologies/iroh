@@ -90,6 +90,7 @@ iroh-metrics = { version = "0.35", default-features = false }
 # local-swarm-discovery
 # swarm-discovery = { version = "0.4", optional = true }
 swarm-discovery = { git = "https://github.com/therishidesai/swarm-discovery.git", branch = "rdesai/feat/multi-interface", optional = true }
+if-addrs = { version = "0.14", optional = true }
 futures-util = "0.3"
 
 # test_utils
@@ -170,7 +171,7 @@ cfg_aliases = { version = "0.2.1" }
 default = ["metrics"]
 metrics = ["iroh-metrics/metrics", "iroh-relay/metrics", "portmapper/metrics"]
 test-utils = ["iroh-relay/test-utils", "iroh-relay/server", "dep:axum"]
-discovery-local-network = ["dep:swarm-discovery"]
+discovery-local-network = ["dep:swarm-discovery", "dep:if-addrs"]
 discovery-pkarr-dht = ["pkarr/dht"]
 examples = [
   "dep:clap",

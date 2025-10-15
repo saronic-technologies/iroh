@@ -2139,9 +2139,9 @@ dependencies = [
 
 [[package]]
 name = "if-addrs"
-version = "0.13.4"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+checksum = "bf39cc0423ee66021dc5eccface85580e4a001e0c5288bae8bea7ecb69225e90"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
@@ -2255,6 +2255,7 @@ dependencies = [
  "getrandom 0.3.2",
  "hickory-resolver",
  "http 1.3.1",
+ "if-addrs",
  "igd-next",
  "indicatif",
  "instant",
@@ -4645,11 +4646,10 @@ dependencies = [
 [[package]]
 name = "swarm-discovery"
 version = "0.4.0"
-source = "git+https://github.com/therishidesai/swarm-discovery.git?branch=rdesai%2Ffeat%2Fmulti-interface#b77eb772ffe5ae10d8d8e2a875c1bf58066a9d51"
+source = "git+https://github.com/therishidesai/swarm-discovery.git?branch=rdesai%2Ffeat%2Fmulti-interface#7e7e874a6958bd0e686aa44526623a1687f75b36"
 dependencies = [
  "acto",
  "hickory-proto",
- "if-addrs",
  "rand 0.9.1",
  "socket2",
  "thiserror 2.0.12",
@@ -5561,7 +5561,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
