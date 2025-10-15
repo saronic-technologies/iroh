@@ -323,7 +323,7 @@ impl MdnsDiscovery {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         rt: &tokio::runtime::Handle,
-    ) -> Result<DropGuard, IntoDiscoveryError> {
+    ) -> Result<Arc<DropGuard>, IntoDiscoveryError> {
         let spawn_rt = rt.clone();
         let callback = move |node_id: &str, peer: &Peer| {
             trace!(
@@ -416,10 +416,7 @@ impl MdnsDiscovery {
             }
         });
 
-        // Return the Arc-wrapped guard by unwrapping it
-        Arc::try_unwrap(guard).map_err(|_| {
-            IntoDiscoveryError::from_err("mdns", std::io::Error::other("Failed to unwrap Arc"))
-        })
+        Ok(guard)
     }
 
     fn socketaddrs_to_addrs(socketaddrs: &BTreeSet<SocketAddr>) -> HashMap<u16, Vec<IpAddr>> {
