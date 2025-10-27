@@ -79,7 +79,8 @@ rustls-platform-verifier = "0.5.3"
 iroh-metrics = { version = "0.36", default-features = false }
 
 # local-swarm-discovery
-swarm-discovery = { version = "0.4", optional = true }
+if-addrs = { version = "0.14", optional = true }
+swarm-discovery = { version = "0.4.1", optional = true }
 futures-util = "0.3"
 
 # test_utils
