@@ -158,7 +158,7 @@ cfg_aliases = { version = "0.2.1" }
 default = ["metrics"]
 metrics = ["iroh-metrics/metrics", "iroh-relay/metrics", "portmapper/metrics"]
 test-utils = ["iroh-relay/test-utils", "iroh-relay/server", "dep:axum"]
-discovery-local-network = ["dep:swarm-discovery"]
+discovery-local-network = ["dep:swarm-discovery", "dep:if-addrs"]
 discovery-pkarr-dht = ["pkarr/dht"]
 
 [package.metadata.docs.rs]
