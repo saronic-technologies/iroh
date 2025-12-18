@@ -90,7 +90,7 @@ iroh-metrics = { version = "0.34", default-features = false }
 
 # local-swarm-discovery
 # swarm-discovery = { version = "0.3.1", optional = true }
-swarm-discovery = { git = "https://github.com/therishidesai/swarm-discovery.git", branch = "rdesai/feat/multi-interface", optional = true }
+swarm-discovery = { git = "https://github.com/ChaseMarSar/swarm-discovery.git", branch = "chase/multicast-socket-binding", optional = true }
 futures-util = "0.3"
 
 # test_utils
@@ -104,6 +104,7 @@ tracing-subscriber = { version = "0.3", features = [
 indicatif = { version = "0.17", features = ["tokio"], optional = true }
 parse-size = { version = "=1.0.0", optional = true } # pinned version to avoid bumping msrv to 1.81
 if-addrs = "0.14.0"
+netwatcher = "0.4.0"
 
 # non-wasm-in-browser dependencies
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
