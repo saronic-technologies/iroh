@@ -70,6 +70,7 @@ use std::{
 
 use if_addrs::get_if_addrs;
 use iroh_base::{EndpointId, PublicKey};
+use netwatcher::list_interfaces;
 use n0_future::{
     Stream,
     boxed::BoxStream,
@@ -138,6 +139,42 @@ enum Message {
 /// Manages the list of subscribers that are subscribed to this Address Lookup.
 #[derive(Debug)]
 struct Subscribers(Vec<mpsc::Sender<DiscoveryEvent>>);
+
+/// Get local network interfaces using netwatcher (Android-compatible) with fallback to if-addrs
+fn get_local_interfaces() -> Vec<IpAddr> {
+    // Try netwatcher first (works on Android 11+)
+    match list_interfaces() {
+        Ok(interfaces) => {
+            let mut ips = Vec::new();
+            for (_name, interface) in interfaces {
+                for ip_record in &interface.ips {
+                    // Skip loopback
+                    if !ip_record.ip.is_loopback() {
+                        ips.push(ip_record.ip);
+                        tracing::debug!("netwatcher: Found interface {} with IP: {}", _name, ip_record.ip);
+                    }
+                }
+            }
+            if !ips.is_empty() {
+                tracing::debug!("netwatcher: Total interfaces found: {}", ips.len());
+                return ips;
+            }
+            tracing::warn!("netwatcher returned no interfaces, falling back to if-addrs");
+        }
+        Err(e) => {
+            tracing::warn!("netwatcher failed ({}), falling back to if-addrs", e);
+        }
+    }
+
+    // Fallback to if-addrs for non-Android or if netwatcher failed
+    get_if_addrs()
+        .inspect_err(|e| tracing::warn!("if-addrs fallback also failed: {e}"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|iface| !iface.is_loopback())
+        .map(|iface| iface.addr.ip())
+        .collect()
+}
 
 impl Subscribers {
     fn new() -> Self {
@@ -496,16 +533,18 @@ impl MdnsAddressLookup {
         let endpoint_id_str = data_encoding::BASE32_NOPAD
             .encode(endpoint_id.as_bytes())
             .to_ascii_lowercase();
-        // Get initial local IPs for multicast
-        let initial_ips: Vec<std::net::IpAddr> = get_if_addrs()
-            .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))?
-            .into_iter()
-            .filter(|iface| !iface.is_loopback())
-            .map(|iface| iface.addr.ip())
+        // Get initial local IPs for multicast (IPv4 only for now)
+        let initial_ips: Vec<std::net::IpAddr> = get_local_interfaces();
+        let initial_ips_v4: Vec<std::net::Ipv4Addr> = initial_ips
+            .iter()
+            .filter_map(|ip| match ip {
+                std::net::IpAddr::V4(v4) => Some(*v4),
+                _ => None,
+            })
             .collect();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
             .with_callback(callback)
-            .with_multicast_interfaces(initial_ips.clone())
+            .with_multicast_interfaces_v4(initial_ips_v4.clone())
             .with_ip_class(IpClass::Auto);
         if advertise {
             let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
@@ -516,36 +555,31 @@ impl MdnsAddressLookup {
 
         let guard = Arc::new(discoverer.spawn(rt).map_err(|e| AddressLookupBuilderError::from_err("mdns", e))?);
         let guard_clone = guard.clone();
-        let mut known_interfaces: HashSet<std::net::IpAddr> = initial_ips.into_iter().collect();
+        let mut known_interfaces: HashSet<std::net::Ipv4Addr> = initial_ips_v4.into_iter().collect();
         
         let monitor_handle = tokio::task::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
 
                 // Get current network interfaces
-                let current_interfaces: HashSet<std::net::IpAddr> = match get_if_addrs() {
-                    Ok(addrs) => addrs
-                        .into_iter()
-                        .filter(|iface| !iface.is_loopback())
-                        .map(|iface| iface.addr.ip())
-                        .filter(|ip| ip.is_ipv4()) // Only monitor IPv4 interfaces
-                        .collect(),
-                    Err(e) => {
-                        tracing::debug!("Failed to get interfaces: {}", e);
-                        continue;
-                    }
-                };
+                let current_interfaces: HashSet<std::net::Ipv4Addr> = get_local_interfaces()
+                    .into_iter()
+                    .filter_map(|ip| match ip {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    })
+                    .collect();
 
                 // Check for new interfaces
                 for new_if in current_interfaces.difference(&known_interfaces) {
                     tracing::debug!("New interface detected: {} - adding to multicast", new_if);
-                    guard_clone.add_interface(*new_if);
+                    guard_clone.add_interface_v4(*new_if);
                 }
 
                 // Check for removed interfaces
                 for old_if in known_interfaces.difference(&current_interfaces) {
                     tracing::debug!("Interface removed: {} - removing from multicast", old_if);
-                    guard_clone.remove_interface(*old_if);
+                    guard_clone.remove_interface_v4(*old_if);
                 }
 
                 known_interfaces = current_interfaces;
