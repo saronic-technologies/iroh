@@ -19,9 +19,11 @@
       with pkgs;
       {
         devShells.default = mkShell {
-          nativeBuildInputs = [
+          packages = [
             # Build tools
             clang
+            cmake
+            go
             lld
             pkg-config
             perl
@@ -39,6 +41,10 @@
             darwin.apple_sdk.frameworks.Security
             darwin.apple_sdk.frameworks.SystemConfiguration
           ];
+
+          shellHook = ''
+            export AWS_LC_FIPS_SYS_CC=clang
+          '';
 
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         };

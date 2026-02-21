@@ -268,7 +268,9 @@ pub mod metrics;
 mod net_report;
 pub mod protocol;
 
-pub use endpoint::{Endpoint, RelayMode};
+pub use endpoint::{CryptoConfig, DefaultCryptoConfig, Endpoint, RelayMode, RingCryptoConfig};
+#[cfg(feature = "aws-lc-rs-fips")]
+pub use endpoint::AwsLcRsFipsCryptoConfig;
 pub use iroh_base::{
     EndpointAddr, EndpointId, KeyParsingError, PublicKey, RelayUrl, RelayUrlParseError, SecretKey,
     Signature, SignatureError, TransportAddr,

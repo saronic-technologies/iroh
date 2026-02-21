@@ -5,6 +5,8 @@ use iroh_base::SecretKey;
 use n0_error::stack_error;
 use webpki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 
+use super::crypto_config::CryptoConfig;
+
 #[derive(Debug)]
 pub(super) struct AlwaysResolvesCert {
     key: Arc<rustls::sign::CertifiedKey>,
@@ -20,7 +22,10 @@ pub(super) enum CreateConfigError {
 }
 
 impl AlwaysResolvesCert {
-    pub(super) fn new(secret_key: &SecretKey) -> Result<Self, CreateConfigError> {
+    pub(super) fn new(
+        secret_key: &SecretKey,
+        crypto_config: &dyn CryptoConfig,
+    ) -> Result<Self, CreateConfigError> {
         // Directly use the key
         let client_private_key = secret_key
             .as_signing_key()
@@ -29,7 +34,7 @@ impl AlwaysResolvesCert {
 
         let client_private_key = PrivatePkcs8KeyDer::from_pem_slice(client_private_key.as_bytes())
             .expect("cannot open private key file");
-        let client_private_key = rustls::crypto::ring::sign::any_eddsa_type(&client_private_key)?;
+        let client_private_key = crypto_config.load_eddsa_signing_key(&client_private_key)?;
 
         let client_public_key = client_private_key
             .public_key()

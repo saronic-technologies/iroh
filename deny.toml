@@ -1,6 +1,6 @@
 [bans]
 multiple-versions = "allow"
-deny = ["aws-lc", "aws-lc-rs", "aws-lc-sys", "native-tls", "openssl"]
+deny = ["native-tls", "openssl"]
 
 [licenses]
 allow = [

@@ -63,6 +63,7 @@ webpki = { package = "rustls-webpki", version = "0.103.7", features = ["ring"] }
 webpki_types = { package = "rustls-pki-types", version = "1.12" }
 webpki-roots = "1.0.3"
 pkcs8 = "0.11.0-rc.9"
+aws-lc-rs = { version = "1", optional = true, default-features = false, features = ["fips"] }
 
 # metrics
 iroh-metrics = { version = "0.38", default-features = false }
@@ -153,6 +154,9 @@ address-lookup-pkarr-dht = ["pkarr/dht"]
 qlog = ["quinn/qlog"]
 # Use private Apple APIs to send multiple packets in a single syscall.
 fast-apple-datapath = ["quinn/fast-apple-datapath"]
+# Enable the aws-lc-rs FIPS crypto provider. This adds support for
+# AwsLcRsFipsCryptoConfig which uses FIPS-validated cryptographic operations.
+aws-lc-rs-fips = ["dep:aws-lc-rs", "rustls/aws_lc_rs", "webpki/aws-lc-rs-fips", "quinn/rustls-aws-lc-rs-fips"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -205,3 +209,7 @@ required-features = []
 [[example]]
 name = "0rtt"
 required-features = []
+
+[[example]]
+name = "fips"
+required-features = ["aws-lc-rs-fips"]

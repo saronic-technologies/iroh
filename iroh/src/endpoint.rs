@@ -63,6 +63,9 @@ pub(crate) mod quic;
 
 #[cfg(not(wasm_browser))]
 pub use bind::{BindOpts, InvalidSocketAddr, ToSocketAddr};
+pub use crate::tls::crypto_config::{CryptoConfig, DefaultCryptoConfig, RingCryptoConfig};
+#[cfg(feature = "aws-lc-rs-fips")]
+pub use crate::tls::crypto_config::AwsLcRsFipsCryptoConfig;
 pub use hooks::{AfterHandshakeOutcome, BeforeConnectOutcome, EndpointHooks};
 
 #[cfg(feature = "qlog")]
@@ -114,6 +117,7 @@ pub struct Builder {
     transports: Vec<TransportConfig>,
     max_tls_tickets: usize,
     hooks: EndpointHooksList,
+    crypto_config: Arc<dyn CryptoConfig>,
 }
 
 impl From<RelayMode> for Option<TransportConfig> {
@@ -179,6 +183,7 @@ impl Builder {
             max_tls_tickets: DEFAULT_MAX_TLS_TICKETS,
             transports,
             hooks: Default::default(),
+            crypto_config: Arc::new(DefaultCryptoConfig::default()),
         }
     }
 
@@ -193,7 +198,11 @@ impl Builder {
 
         let static_config = StaticConfig {
             transport_config: self.transport_config.clone(),
-            tls_config: tls::TlsConfig::new(secret_key.clone(), self.max_tls_tickets),
+            tls_config: tls::TlsConfig::new(
+                secret_key.clone(),
+                self.max_tls_tickets,
+                self.crypto_config.as_ref(),
+            ),
             keylog: self.keylog,
         };
         let server_config = static_config.create_server_config(self.alpn_protocols);
@@ -621,6 +630,21 @@ impl Builder {
     /// The default is 256, taking about 150 KiB in memory.
     pub fn max_tls_tickets(mut self, n: usize) -> Self {
         self.max_tls_tickets = n;
+        self
+    }
+
+    /// Sets the crypto configuration for the endpoint's TLS layer.
+    ///
+    /// This controls which cryptographic backend is used for TLS operations.
+    /// By default, the [`RingCryptoConfig`] backend is used.
+    ///
+    /// Implement the [`CryptoConfig`] trait to use a different backend
+    /// (e.g. `aws-lc-rs`).
+    ///
+    /// [`RingCryptoConfig`]: crate::tls::crypto_config::RingCryptoConfig
+    /// [`CryptoConfig`]: crate::tls::crypto_config::CryptoConfig
+    pub fn crypto_config(mut self, config: impl CryptoConfig) -> Self {
+        self.crypto_config = Arc::new(config);
         self
     }
 

@@ -13,6 +13,7 @@ use tracing::warn;
 
 use self::resolver::AlwaysResolvesCert;
 
+pub(crate) mod crypto_config;
 pub(crate) mod name;
 mod resolver;
 mod verifier;
@@ -41,21 +42,32 @@ pub(crate) struct TlsConfig {
     server_verifier: Arc<verifier::ServerCertificateVerifier>,
     client_verifier: Arc<verifier::ClientCertificateVerifier>,
     session_store: Arc<dyn rustls::client::ClientSessionStore>,
+    crypto_provider: rustls::crypto::CryptoProvider,
+    /// Client config for QUIC address discovery (QAD) connections.
+    pub(crate) qad_client_config: rustls::ClientConfig,
 }
 
 impl TlsConfig {
-    pub(crate) fn new(secret_key: SecretKey, max_tls_tickets: usize) -> Self {
+    pub(crate) fn new(
+        secret_key: SecretKey,
+        max_tls_tickets: usize,
+        crypto_config: &dyn crypto_config::CryptoConfig,
+    ) -> Self {
+        let sig_algs = crypto_config.supported_sig_algs();
         let cert_resolver = Arc::new(
-            AlwaysResolvesCert::new(&secret_key).expect("Client cert key DER is valid; qed"),
+            AlwaysResolvesCert::new(&secret_key, crypto_config)
+                .expect("Client cert key DER is valid; qed"),
         );
         Self {
             secret_key,
             cert_resolver,
-            server_verifier: Arc::new(verifier::ServerCertificateVerifier),
-            client_verifier: Arc::new(verifier::ClientCertificateVerifier),
+            server_verifier: Arc::new(verifier::ServerCertificateVerifier::new(sig_algs.clone())),
+            client_verifier: Arc::new(verifier::ClientCertificateVerifier::new(sig_algs)),
             session_store: Arc::new(rustls::client::ClientSessionMemoryCache::new(
                 max_tls_tickets,
             )),
+            crypto_provider: crypto_config.crypto_provider(),
+            qad_client_config: crypto_config.quic_address_discovery_client_config(),
         }
     }
 
@@ -70,10 +82,10 @@ impl TlsConfig {
         keylog: bool,
     ) -> QuicClientConfig {
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            self.crypto_provider.clone(),
         ))
         .with_protocol_versions(verifier::PROTOCOL_VERSIONS)
-        .expect("version supported by ring")
+        .expect("version supported by crypto provider")
         .dangerous()
         .with_custom_certificate_verifier(self.server_verifier.clone())
         .with_client_cert_resolver(self.cert_resolver.clone());
@@ -90,7 +102,7 @@ impl TlsConfig {
 
         crypto
             .try_into()
-            .expect("expected to have a TLS1.3-compatible crypto provider set (hardcoded)")
+            .expect("expected to have a TLS1.3-compatible crypto provider set")
     }
 
     /// Create a TLS server configuration.
@@ -104,7 +116,7 @@ impl TlsConfig {
         keylog: bool,
     ) -> QuicServerConfig {
         let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            self.crypto_provider.clone(),
         ))
         .with_protocol_versions(verifier::PROTOCOL_VERSIONS)
         .expect("fixed config")
@@ -121,6 +133,6 @@ impl TlsConfig {
         crypto.max_early_data_size = u32::MAX;
         crypto
             .try_into()
-            .expect("expected to have a TLS1.3-compatible crypto provider set (hardcoded)")
+            .expect("expected to have a TLS1.3-compatible crypto provider set")
     }
 }
