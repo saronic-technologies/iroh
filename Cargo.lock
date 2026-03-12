@@ -4673,7 +4673,7 @@ dependencies = [
 [[package]]
 name = "swarm-discovery"
 version = "0.4.0"
-source = "git+https://github.com/ChaseMarSar/swarm-discovery.git?branch=chase/multicast-socket-binding#6851544428a8718c1c140b5cc9bd622852d0f169"
+source = "git+https://github.com/saronic-technologies/swarm-discovery.git?branch=android-multicast-socket-binding-stable#ef7274d53b7b30257bca04f4b5318eaa1c322a82"
 dependencies = [
  "acto",
  "hickory-proto",
