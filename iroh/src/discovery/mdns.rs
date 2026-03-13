@@ -116,6 +116,8 @@ fn get_local_interfaces() -> Vec<IpAddr> {
 pub struct MdnsDiscovery {
     #[allow(dead_code)]
     handle: AbortOnDropHandle<()>,
+    #[allow(dead_code)]
+    monitor_handle: AbortOnDropHandle<()>,
     sender: mpsc::Sender<Message>,
     /// When `local_addrs` changes, we re-publish our info.
     local_addrs: Watchable<Option<NodeData>>,
@@ -184,7 +186,7 @@ impl MdnsDiscovery {
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let discovery =
+        let (discovery, monitor_handle) =
             MdnsDiscovery::spawn_discoverer(node_id, task_sender.clone(), BTreeSet::new(), &rt)?;
 
         let local_addrs: Watchable<Option<NodeData>> = Watchable::default();
@@ -337,6 +339,7 @@ impl MdnsDiscovery {
         let handle = task::spawn(discovery_fut.instrument(info_span!("swarm-discovery.actor")));
         Ok(Self {
             handle: AbortOnDropHandle::new(handle),
+            monitor_handle,
             sender: send,
             local_addrs,
         })
@@ -347,7 +350,7 @@ impl MdnsDiscovery {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         rt: &tokio::runtime::Handle,
-    ) -> Result<Arc<DropGuard>> {
+    ) -> Result<(Arc<DropGuard>, AbortOnDropHandle<()>)> {
         let spawn_rt = rt.clone();
         let callback = move |node_id: &str, peer: &Peer| {
             trace!(
@@ -387,10 +390,10 @@ impl MdnsDiscovery {
         let guard = Arc::new(discoverer.spawn(rt)?);
         let guard_clone = guard.clone();
         let mut known_interfaces: HashSet<std::net::Ipv4Addr> = initial_ips_v4.into_iter().collect();
-        tokio::task::spawn(async move {
+        let monitor_handle = tokio::task::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(5)).await;
-                
+
                 // Get current network interfaces
                 let current_interfaces: HashSet<std::net::Ipv4Addr> = get_local_interfaces()
                     .into_iter()
@@ -416,7 +419,7 @@ impl MdnsDiscovery {
             }
         });
 
-        Ok(guard)
+        Ok((guard, AbortOnDropHandle::new(monitor_handle)))
     }
 
     fn socketaddrs_to_addrs(socketaddrs: &BTreeSet<SocketAddr>) -> HashMap<u16, Vec<IpAddr>> {
