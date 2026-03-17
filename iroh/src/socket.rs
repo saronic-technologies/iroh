@@ -66,6 +66,7 @@ use crate::dns::DnsResolver;
 #[cfg(not(wasm_browser))]
 use crate::net_report::QuicConfig;
 use crate::{
+    IdFromQuicConn,
     address_lookup::{self, AddressLookupFailed, EndpointData, UserData},
     defaults::timeouts::NET_REPORT_TIMEOUT,
     endpoint::{
@@ -241,6 +242,7 @@ pub(crate) struct StaticConfig {
     pub(crate) token_key: Arc<RustlsTokenKey>,
     #[debug("Arc<dyn TokenStore>")]
     pub(crate) token_store: Arc<dyn TokenStore>,
+    pub(crate) remote_id_strategy: Box<dyn IdFromQuicConn>,
     pub(crate) transport_config: QuicTransportConfig,
 }
 
@@ -2135,7 +2137,7 @@ mod tests {
         Endpoint, SecretKey,
         address_lookup::memory::MemoryLookup,
         dns::DnsResolver,
-        endpoint::{QuicTransportConfig, presets},
+        endpoint::{QuicTransportConfig, id::RawEd25519Id, presets},
         socket::{
             EndpointInner, StaticConfig, TransportConfig,
             biased_rtt_path_selector::BiasedRttPathSelector,
@@ -2149,7 +2151,7 @@ mod tests {
     fn default_options(rng: &mut impl CryptoRng) -> Options {
         let crypto_provider = default_provider();
         let secret_key = SecretKey::from_bytes(&rng.random());
-        let tls_config = tls::TlsConfig::new(
+        let tls_config = tls::TlsConfig::new_default(
             secret_key.clone(),
             DEFAULT_MAX_TLS_TICKETS,
             crypto_provider.clone(),
@@ -2160,6 +2162,7 @@ mod tests {
             tls_config,
             token_key: Arc::new(RustlsTokenKey::new(rng, &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
+            remote_id_strategy: Box::new(RawEd25519Id {}),
             transport_config: QuicTransportConfig::default(),
         };
         let server_config = static_config.create_server_config(vec![]);
@@ -2563,7 +2566,7 @@ mod tests {
     #[instrument(name = "ep", skip_all, fields(me = %secret_key.public().fmt_short()))]
     async fn socket_ep(secret_key: SecretKey) -> Result<EndpointInner> {
         let crypto_provider = default_provider();
-        let tls_config = tls::TlsConfig::new(
+        let tls_config = tls::TlsConfig::new_default(
             secret_key.clone(),
             DEFAULT_MAX_TLS_TICKETS,
             crypto_provider.clone(),
@@ -2575,6 +2578,7 @@ mod tests {
             tls_config,
             token_key: Arc::new(RustlsTokenKey::new(&mut rand::rng(), &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
+            remote_id_strategy: Box::new(RawEd25519Id),
             transport_config: QuicTransportConfig::default(),
         };
         let server_config = static_config.create_server_config(vec![ALPN.to_vec()]);
@@ -2643,7 +2647,7 @@ mod tests {
         endpoint_id: EndpointId,
         transport_config: Arc<noq::TransportConfig>,
     ) -> Result<noq::Connection> {
-        let mut quic_client_config = tls::TlsConfig::new(
+        let mut quic_client_config = tls::TlsConfig::new_default(
             ep_secret_key.clone(),
             DEFAULT_MAX_TLS_TICKETS,
             default_provider(),

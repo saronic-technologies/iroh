@@ -66,24 +66,27 @@ use crate::endpoint::transports::CustomTransport;
 use crate::net_report::Report as NetReport;
 pub use crate::tls::TlsConfigError;
 use crate::{
+    IdFromQuicConn,
     address_lookup::{
         AddrFilter, AddressLookupBuilder, AddressLookupFailed, AddressLookupServices,
         DynAddressLookupBuilder, UserData,
     },
-    endpoint::presets::Preset,
+    endpoint::{id::RawEd25519Id, presets::Preset},
     metrics::EndpointMetrics,
     socket::{
         self, EndpointInner, RemoteStateActorStoppedError, StaticConfig,
         biased_rtt_path_selector::BiasedRttPathSelector, mapped_addrs::MappedAddr,
         remote_map::PathSelector, transports::RelayConnectionState,
     },
-    tls::{self, DEFAULT_MAX_TLS_TICKETS, misc::RustlsTokenKey},
+    tls::{self, DEFAULT_MAX_TLS_TICKETS, EndpointTlsConfigParams, misc::RustlsTokenKey},
 };
 
 #[cfg(not(wasm_browser))]
 mod bind;
 mod connection;
 pub(crate) mod hooks;
+/// Endpoint identity extraction from QUIC connections.
+pub mod id;
 pub mod presets;
 pub(crate) mod quic;
 
@@ -141,6 +144,8 @@ pub struct Builder {
     #[cfg(not(wasm_browser))]
     dns_resolver: Option<DnsResolver>,
     transports: Vec<TransportConfig>,
+    tls_config_params: Option<EndpointTlsConfigParams>,
+    remote_id_strategy: Box<dyn IdFromQuicConn>,
     max_tls_tickets: usize,
     hooks: EndpointHooksList,
     path_selector: Arc<dyn PathSelector>,
@@ -208,6 +213,8 @@ impl Builder {
             ca_tls_config: None,
             #[cfg(not(wasm_browser))]
             dns_resolver: None,
+            tls_config_params: None,
+            remote_id_strategy: Box::new(RawEd25519Id {}),
             max_tls_tickets: DEFAULT_MAX_TLS_TICKETS,
             transports,
             hooks: Default::default(),
@@ -237,16 +244,21 @@ impl Builder {
         let span = info_span!("endpoint", id = %secret_key.public().fmt_short());
         let _guard = span.enter();
 
-        let tls_config = tls::TlsConfig::new(
-            secret_key.clone(),
-            self.max_tls_tickets,
-            crypto_provider.clone(),
-        );
+        let tls_config: tls::TlsConfig = match self.tls_config_params {
+            Some(cfg) => tls::TlsConfig::new(secret_key.clone(), cfg),
+            None => tls::TlsConfig::new_default(
+                secret_key.clone(),
+                self.max_tls_tickets,
+                crypto_provider.clone(),
+            ),
+        };
+
         let static_config = StaticConfig {
             server_config: tls_config.make_server_config(self.keylog)?,
             client_config: tls_config.make_client_config(self.keylog)?,
             tls_config,
             transport_config: self.transport_config.clone(),
+            remote_id_strategy: self.remote_id_strategy,
             token_key,
             token_store: Arc::new(noq::TokenMemoryCache::default()),
         };
@@ -730,6 +742,29 @@ impl Builder {
     /// filename will result in this file being used to log the TLS pre-master keys.
     pub fn keylog(mut self, keylog: bool) -> Self {
         self.keylog = keylog;
+        self
+    }
+
+    /// Set the endpoint TLS config parameters.
+    ///
+    /// Set this to customize endpoint TLS configuration if you need advanced
+    /// control over authentication and authorization.
+    ///
+    /// Default is designed to interoperate with Iroh's pubkey ID. Do NOT
+    /// modify this unless you understand the risks associated with customizing
+    /// authentication and authorization logic at the TLS layer.
+    pub fn tls_config_params(mut self, cfg: EndpointTlsConfigParams) -> Self {
+        self.tls_config_params = Some(cfg);
+        self
+    }
+
+    /// Set the strategy used to identify a remote endpoint using a quic connection.
+    ///
+    /// By default, this will extract an Ed25519 key from the remote peer's
+    /// certificate. Use this configuration option in conjunction with the
+    /// tls_config_params option to customize the quic handshake.
+    pub fn remote_id_strategy(mut self, strategy: Box<dyn IdFromQuicConn>) -> Self {
+        self.remote_id_strategy = strategy;
         self
     }
 
@@ -1758,6 +1793,10 @@ impl Endpoint {
             return Err(e!(EndpointError::Closed));
         }
         Ok(self.inner.clone())
+    }
+
+    pub(crate) fn remote_id_strategy(&self) -> &dyn IdFromQuicConn {
+        &*self.inner.static_config.remote_id_strategy
     }
 }
 

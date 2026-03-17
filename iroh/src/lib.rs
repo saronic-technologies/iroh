@@ -279,6 +279,7 @@ pub mod metrics;
 mod net_report;
 pub mod protocol;
 
+pub use endpoint::id::IdFromQuicConn;
 pub use endpoint::{Endpoint, RelayMode};
 pub use iroh_base::{
     EndpointAddr, EndpointId, KeyParsingError, PublicKey, RelayUrl, RelayUrlParseError, SecretKey,
@@ -290,6 +291,7 @@ pub use iroh_dns::endpoint_info;
 pub use iroh_relay::{RelayConfig, RelayMap};
 pub use n0_watcher::Watcher;
 pub use net_report::{NetReportConfig, TIMEOUT as NET_REPORT_TIMEOUT};
+pub use tls::EndpointTlsConfigParams;
 
 #[cfg(feature = "unstable-net-report")]
 pub mod unstable_net_report {

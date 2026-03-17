@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use iroh_base::SecretKey;
 use noq::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use rustls::crypto::CryptoProvider;
 use tracing::warn;
 
 use self::resolver::ResolveRawPublicKeyCert;
@@ -34,6 +35,34 @@ pub use iroh_relay::tls::default_provider;
 /// I think 150KB is an acceptable default upper limit for such a cache.
 pub(crate) const DEFAULT_MAX_TLS_TICKETS: usize = 8 * 32;
 
+/// Parameters for constructing a [`TlsConfig`].
+///
+/// This bundles the TLS components that can be customized when building an
+/// endpoint: certificate resolvers, certificate verifiers, session storage,
+/// and ticket cache sizing. A default set of parameters is used by
+/// [`TlsConfig::new_default`]; pass a custom instance to [`TlsConfig::new`]
+/// to override individual components.
+#[derive(Debug)]
+pub struct EndpointTlsConfigParams {
+    /// Resolver that provides the client certificate during TLS handshakes.
+    pub client_cert_resolver: Arc<dyn rustls::client::ResolvesClientCert>,
+
+    /// Resolver that provides the server certificate during TLS handshakes.
+    pub server_cert_resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+
+    /// Verifier used to validate server certificates presented by peers.
+    pub server_verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+
+    /// Verifier used to validate client certificates presented by peers.
+    pub client_verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+
+    /// Storage backend for TLS client session data (tickets, etc.).
+    pub session_store: Arc<dyn rustls::client::ClientSessionStore>,
+
+    /// Crypto provider used for all TLS crypto operations
+    pub crypto_provider: Arc<CryptoProvider>,
+}
+
 /// Configuration for TLS.
 ///
 /// The main point of this struct is to keep state that should be kept the same
@@ -44,29 +73,49 @@ pub(crate) const DEFAULT_MAX_TLS_TICKETS: usize = 8 * 32;
 #[derive(Debug)]
 pub(crate) struct TlsConfig {
     pub(crate) secret_key: SecretKey,
-    cert_resolver: Arc<ResolveRawPublicKeyCert>,
-    server_verifier: Arc<verifier::ServerCertificateVerifier>,
-    client_verifier: Arc<verifier::ClientCertificateVerifier>,
+    client_cert_resolver: Arc<dyn rustls::client::ResolvesClientCert>,
+    server_cert_resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    server_verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    client_verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
     session_store: Arc<dyn rustls::client::ClientSessionStore>,
-    crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+    crypto_provider: Arc<CryptoProvider>,
 }
 
 impl TlsConfig {
     pub(crate) fn new(
         secret_key: SecretKey,
-        max_tls_tickets: usize,
-        crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+        endpoint_tls_config_params: EndpointTlsConfigParams,
     ) -> Self {
         Self {
-            cert_resolver: Arc::new(ResolveRawPublicKeyCert::new(&secret_key)),
+            secret_key,
+            client_cert_resolver: endpoint_tls_config_params.client_cert_resolver,
+            server_cert_resolver: endpoint_tls_config_params.server_cert_resolver,
+            server_verifier: endpoint_tls_config_params.server_verifier,
+            client_verifier: endpoint_tls_config_params.client_verifier,
+            session_store: endpoint_tls_config_params.session_store,
+            crypto_provider: endpoint_tls_config_params.crypto_provider,
+        }
+    }
+
+    pub(crate) fn new_default(
+        secret_key: SecretKey,
+        max_tls_tickets: usize,
+        crypto_provider: Arc<CryptoProvider>,
+    ) -> Self {
+        let cert_resolver = Arc::new(ResolveRawPublicKeyCert::new(&secret_key));
+
+        let session_store = rustls::client::ClientSessionMemoryCache::new(max_tls_tickets);
+
+        let endpoint_tls_config_params = EndpointTlsConfigParams {
+            client_cert_resolver: cert_resolver.clone(),
+            server_cert_resolver: cert_resolver,
             server_verifier: Arc::new(verifier::ServerCertificateVerifier),
             client_verifier: Arc::new(verifier::ClientCertificateVerifier),
-            session_store: Arc::new(rustls::client::ClientSessionMemoryCache::new(
-                max_tls_tickets,
-            )),
+            session_store: Arc::new(session_store),
             crypto_provider,
-            secret_key,
-        }
+        };
+
+        Self::new(secret_key, endpoint_tls_config_params)
     }
 
     /// Create a TLS client configuration.
@@ -82,7 +131,7 @@ impl TlsConfig {
             .with_protocol_versions(verifier::PROTOCOL_VERSIONS)?
             .dangerous()
             .with_custom_certificate_verifier(self.server_verifier.clone())
-            .with_client_cert_resolver(self.cert_resolver.clone());
+            .with_client_cert_resolver(self.client_cert_resolver.clone());
 
         // TODO: enable/disable 0-RTT/storing tickets
         crypto.resumption = rustls::client::Resumption::store(self.session_store.clone());
@@ -109,7 +158,7 @@ impl TlsConfig {
         let mut crypto = rustls::ServerConfig::builder_with_provider(self.crypto_provider.clone())
             .with_protocol_versions(verifier::PROTOCOL_VERSIONS)?
             .with_client_cert_verifier(self.client_verifier.clone())
-            .with_cert_resolver(self.cert_resolver.clone());
+            .with_cert_resolver(self.server_cert_resolver.clone());
         if keylog {
             warn!("enabling SSLKEYLOGFILE for TLS pre-master keys");
             crypto.key_log = Arc::new(rustls::KeyLogFile::new());
