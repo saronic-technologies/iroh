@@ -60,7 +60,7 @@
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::Arc,
 };
@@ -73,7 +73,7 @@ use n0_future::{
     time::{self, Duration},
 };
 use n0_watcher::{Watchable, Watcher as _};
-use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
+use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer, utilities::if_nametoindex};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{Instrument, debug, error, info_span, trace, warn};
 
@@ -534,21 +534,25 @@ impl MdnsAddressLookup {
     }
 
     async fn spawn_interface_watcher(guard: Arc<DropGuard>) {
-        let mut known_interfaces: HashSet<Ipv4Addr> = HashSet::new();
+        let mut known_interfaces: HashSet<String> = HashSet::new();
 
         loop {
-            let current: HashSet<Ipv4Addr> = interfaces_v4().await.into_iter().collect();
+            let current: HashSet<String> = interfaces_v4().await.into_iter().collect();
 
             // Add new interfaces
-            for &addr in current.difference(&known_interfaces) {
-                trace!(%addr, "adding multicast interface");
-                guard.add_interface_v4(addr);
+            for addr in current.difference(&known_interfaces) {
+                debug!(%addr, "adding multicast interface");
+                if let Ok(iface) = if_nametoindex(addr) {
+                    guard.add_interface_v4(iface);
+                }
             }
 
             // Remove gone interfaces
-            for &addr in known_interfaces.difference(&current) {
-                trace!(%addr, "removing multicast interface");
-                guard.remove_interface_v4(addr);
+            for addr in known_interfaces.difference(&current) {
+                debug!(%addr, "removing multicast interface");
+                if let Ok(iface) = if_nametoindex(addr) {
+                    guard.remove_interface_v4(iface);
+                }
             }
 
             known_interfaces = current;
@@ -571,7 +575,7 @@ impl MdnsAddressLookup {
     }
 }
 
-async fn interfaces_v4() -> Vec<Ipv4Addr> {
+async fn interfaces_v4() -> Vec<String> {
     // Load current network interfaces state
     let interfaces = netwatch::interfaces::State::new().await;
 
@@ -579,15 +583,7 @@ async fn interfaces_v4() -> Vec<Ipv4Addr> {
     interfaces
         .interfaces
         .into_iter()
-        .filter_map(|(_, iface)| {
-            iface
-                .addrs()
-                .find(|i| i.addr().is_ipv4())
-                .and_then(|ipnet| match ipnet.addr() {
-                    std::net::IpAddr::V4(v4) => Some(v4),
-                    _ => None,
-                })
-        })
+        .map(|(_, iface)| iface.name().to_string())
         .collect()
 }
 
@@ -681,7 +677,8 @@ mod tests {
             // Create Address LookupA with advertise=false (only listens)
             let (_, address_lookup_a) = make_address_lookup(&mut rng, false, "test-resolve")?;
             // Create Address LookupB with advertise=true (will broadcast)
-            let (endpoint_id_b, address_lookup_b) = make_address_lookup(&mut rng, true, "test-resolve")?;
+            let (endpoint_id_b, address_lookup_b) =
+                make_address_lookup(&mut rng, true, "test-resolve")?;
 
             // make addr info for discoverer b
             let user_data: UserData = "foobar".parse()?;
@@ -743,7 +740,8 @@ mod tests {
         async fn mdns_publish_expire() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
             let (_, address_lookup_a) = make_address_lookup(&mut rng, false, "test-expire")?;
-            let (endpoint_id_b, address_lookup_b) = make_address_lookup(&mut rng, true, "test-expire")?;
+            let (endpoint_id_b, address_lookup_b) =
+                make_address_lookup(&mut rng, true, "test-expire")?;
 
             // publish address_lookup_b's address
             let endpoint_data =
@@ -809,7 +807,8 @@ mod tests {
                 EndpointData::new([TransportAddr::Ip("0.0.0.0:11111".parse().unwrap())]);
 
             for i in 0..num_endpoints {
-                let (endpoint_id, address_lookup) = make_address_lookup(&mut rng, true, "test-subscribe")?;
+                let (endpoint_id, address_lookup) =
+                    make_address_lookup(&mut rng, true, "test-subscribe")?;
                 let user_data: UserData = format!("endpoint{i}").parse()?;
                 let endpoint_data = endpoint_data
                     .clone()
@@ -857,9 +856,11 @@ mod tests {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
             let (_, address_lookup_a) = make_address_lookup(&mut rng, false, "test-noadvert")?;
-            let (endpoint_id_b, address_lookup_b) = make_address_lookup(&mut rng, false, "test-noadvert")?;
+            let (endpoint_id_b, address_lookup_b) =
+                make_address_lookup(&mut rng, false, "test-noadvert")?;
 
-            let (endpoint_id_c, address_lookup_c) = make_address_lookup(&mut rng, true, "test-noadvert")?;
+            let (endpoint_id_c, address_lookup_c) =
+                make_address_lookup(&mut rng, true, "test-noadvert")?;
             let endpoint_data_c =
                 EndpointData::new([TransportAddr::Ip("0.0.0.0:22222".parse().unwrap())]);
             address_lookup_c.publish(&endpoint_data_c);
