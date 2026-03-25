@@ -289,15 +289,12 @@ impl MdnsAddressLookup {
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let initial_interfaces = interface_indices_v4();
-        debug!(?initial_interfaces, "detected initial multicast interfaces");
         let address_lookup = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
             advertise,
             task_sender.clone(),
             BTreeSet::new(),
             service_name,
-            initial_interfaces,
             &rt,
         )?;
 
@@ -500,7 +497,6 @@ impl MdnsAddressLookup {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         service_name: String,
-        multicast_interfaces: Vec<u32>,
         rt: &tokio::runtime::Handle,
     ) -> Result<Arc<DropGuard>, AddressLookupBuilderError> {
         let spawn_rt = rt.clone();
@@ -523,8 +519,7 @@ impl MdnsAddressLookup {
             .to_ascii_lowercase();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
             .with_callback(callback)
-            .with_ip_class(IpClass::Auto)
-            .with_multicast_interfaces_v4(multicast_interfaces);
+            .with_ip_class(IpClass::Auto);
         if advertise {
             let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
             for addr in addrs {
@@ -578,24 +573,6 @@ impl MdnsAddressLookup {
         }
         addrs
     }
-}
-
-/// Returns the names of all non-loopback network interfaces (sync, via `netdev`).
-fn interfaces_v4_sync() -> Vec<String> {
-    netdev::interface::get_interfaces()
-        .into_iter()
-        .filter(|iface| !iface.ipv4.is_empty())
-        .filter(|iface| !iface.ipv4.iter().all(|a| a.addr().is_loopback()))
-        .map(|iface| iface.name)
-        .collect()
-}
-
-/// Returns the OS interface indices of all non-loopback interfaces (sync).
-fn interface_indices_v4() -> Vec<u32> {
-    interfaces_v4_sync()
-        .iter()
-        .filter_map(|name| if_nametoindex(name).ok())
-        .collect()
 }
 
 async fn interfaces_v4() -> Vec<String> {

@@ -71,7 +71,6 @@ iroh-metrics = { version = "0.38", default-features = false }
 
 # mdns
 swarm-discovery = { git = "https://github.com/saronic-technologies/swarm-discovery", rev = "e9c303cca96ba7b499938a7a07bd05c5c4480ca6", optional = true }
-netdev = { version = "0.40", optional = true }
 futures-util = "0.3"
 
 # test_utils
@@ -148,7 +147,7 @@ default = ["metrics", "fast-apple-datapath", "portmapper"]
 portmapper = ["dep:portmapper"]
 metrics = ["iroh-metrics/metrics", "iroh-relay/metrics", "portmapper?/metrics"]
 test-utils = ["iroh-relay/test-utils", "iroh-relay/server", "dep:axum"]
-address-lookup-mdns = ["dep:swarm-discovery", "dep:netdev"]
+address-lookup-mdns = ["dep:swarm-discovery"]
 address-lookup-pkarr-dht = ["pkarr/dht", "pkarr/relays"]
 # Enables fetching TLS trust anchors from the operating system
 platform-verifier = ["iroh-relay/platform-verifier"]
