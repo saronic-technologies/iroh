@@ -31,25 +31,20 @@
 //! }
 //! ```
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
+    sync::Arc,
 };
 
 use anyhow::Result;
 use derive_more::FromStr;
-use if_addrs::get_if_addrs;
 use iroh_base::{NodeId, PublicKey};
-use netwatcher::list_interfaces;
 use n0_future::{
     boxed::BoxStream,
     task::{self, AbortOnDropHandle, JoinSet},
     time::{self, Duration},
 };
-use std::{
-    collections::HashSet,
-    sync::Arc
-};
-use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
+use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer, utilities::if_nametoindex};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info_span, trace, warn, Instrument};
 
@@ -76,40 +71,8 @@ const USER_DATA_ATTRIBUTE: &str = "user-data";
 /// How long we will wait before we stop sending discovery items
 const DISCOVERY_DURATION: Duration = Duration::from_secs(10);
 
-/// Get local network interfaces using netwatcher (Android-compatible) with fallback to if-addrs
-fn get_local_interfaces() -> Vec<IpAddr> {
-    // Try netwatcher first (works on Android 11+)
-    match list_interfaces() {
-        Ok(interfaces) => {
-            let mut ips = Vec::new();
-            for (_name, interface) in interfaces {
-                for ip_record in &interface.ips {
-                    // Skip loopback
-                    if !ip_record.ip.is_loopback() {
-                        ips.push(ip_record.ip);
-                        tracing::info!("netwatcher: Found interface {} with IP: {}", _name, ip_record.ip);
-                    }
-                }
-            }
-            if !ips.is_empty() {
-                tracing::info!("netwatcher: Total interfaces found: {}", ips.len());
-                return ips;
-            }
-            tracing::warn!("netwatcher returned no interfaces, falling back to if-addrs");
-        }
-        Err(e) => {
-            tracing::warn!("netwatcher failed ({}), falling back to if-addrs", e);
-        }
-    }
-
-    // Fallback to if-addrs for non-Android or if netwatcher failed
-    get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|iface| !iface.is_loopback())
-        .map(|iface| iface.addr.ip())
-        .collect()
-}
+/// Duration of time between interface updates
+const INTERFACE_UPDATE_DURATION: Duration = Duration::from_secs(5);
 
 /// Discovery using `swarm-discovery`, a variation on mdns
 #[derive(Debug)]
@@ -186,8 +149,15 @@ impl MdnsDiscovery {
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let (discovery, monitor_handle) =
+        let discovery =
             MdnsDiscovery::spawn_discoverer(node_id, task_sender.clone(), BTreeSet::new(), &rt)?;
+
+        let discovery_clone = Arc::clone(&discovery);
+        let interface_watcher =
+            async move { MdnsDiscovery::spawn_interface_watcher(discovery_clone).await };
+        let monitor_handle = task::spawn(
+            interface_watcher.instrument(info_span!("swarm-discovery.multi-interface.actor")),
+        );
 
         let local_addrs: Watchable<Option<NodeData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
@@ -339,7 +309,7 @@ impl MdnsDiscovery {
         let handle = task::spawn(discovery_fut.instrument(info_span!("swarm-discovery.actor")));
         Ok(Self {
             handle: AbortOnDropHandle::new(handle),
-            monitor_handle,
+            monitor_handle: AbortOnDropHandle::new(monitor_handle),
             sender: send,
             local_addrs,
         })
@@ -350,7 +320,7 @@ impl MdnsDiscovery {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         rt: &tokio::runtime::Handle,
-    ) -> Result<(Arc<DropGuard>, AbortOnDropHandle<()>)> {
+    ) -> Result<Arc<DropGuard>> {
         let spawn_rt = rt.clone();
         let callback = move |node_id: &str, peer: &Peer| {
             trace!(
@@ -370,56 +340,42 @@ impl MdnsDiscovery {
         let node_id_str = data_encoding::BASE32_NOPAD
             .encode(node_id.as_bytes())
             .to_ascii_lowercase();
-        // Get initial local IPs for multicast (IPv4 only for now)
-        let initial_ips: Vec<std::net::IpAddr> = get_local_interfaces();
-        let initial_ips_v4: Vec<std::net::Ipv4Addr> = initial_ips
-            .iter()
-            .filter_map(|ip| match ip {
-                std::net::IpAddr::V4(v4) => Some(*v4),
-                _ => None,
-            })
-            .collect();
         let mut discoverer = Discoverer::new_interactive(N0_LOCAL_SWARM.to_string(), node_id_str)
             .with_callback(callback)
-            .with_multicast_interfaces_v4(initial_ips_v4.clone())
             .with_ip_class(IpClass::Auto);
         for addr in addrs {
             discoverer = discoverer.with_addrs(addr.0, addr.1);
         }
 
-        let guard = Arc::new(discoverer.spawn(rt)?);
-        let guard_clone = guard.clone();
-        let mut known_interfaces: HashSet<std::net::Ipv4Addr> = initial_ips_v4.into_iter().collect();
-        let monitor_handle = tokio::task::spawn(async move {
-            loop {
-                time::sleep(Duration::from_secs(5)).await;
+        Ok(Arc::new(discoverer.spawn(rt)?))
+    }
 
-                // Get current network interfaces
-                let current_interfaces: HashSet<std::net::Ipv4Addr> = get_local_interfaces()
-                    .into_iter()
-                    .filter_map(|ip| match ip {
-                        std::net::IpAddr::V4(v4) => Some(v4),
-                        _ => None,
-                    })
-                    .collect();
+    async fn spawn_interface_watcher(guard: Arc<DropGuard>) {
+        let mut known_interfaces: HashSet<String> = HashSet::new();
 
-                // Check for new interfaces
-                for new_if in current_interfaces.difference(&known_interfaces) {
-                    tracing::debug!("📡 New interface detected: {} - adding to multicast", new_if);
-                    guard_clone.add_interface_v4(*new_if);
+        loop {
+            let current: HashSet<String> = interfaces_v4().await.into_iter().collect();
+
+            // Add new interfaces
+            for addr in current.difference(&known_interfaces) {
+                debug!(%addr, "adding multicast interface");
+                if let Ok(iface) = if_nametoindex(addr) {
+                    guard.add_interface_v4(iface);
                 }
-
-                // Check for removed interfaces
-                for old_if in known_interfaces.difference(&current_interfaces) {
-                    tracing::debug!("❌ Interface removed: {} - removing from multicast", old_if);
-                    guard_clone.remove_interface_v4(*old_if);
-                }
-
-                known_interfaces = current_interfaces;
             }
-        });
 
-        Ok((guard, AbortOnDropHandle::new(monitor_handle)))
+            // Remove gone interfaces
+            for addr in known_interfaces.difference(&current) {
+                debug!(%addr, "removing multicast interface");
+                if let Ok(iface) = if_nametoindex(addr) {
+                    guard.remove_interface_v4(iface);
+                }
+            }
+
+            known_interfaces = current;
+
+            time::sleep(INTERFACE_UPDATE_DURATION).await;
+        }
     }
 
     fn socketaddrs_to_addrs(socketaddrs: &BTreeSet<SocketAddr>) -> HashMap<u16, Vec<IpAddr>> {
@@ -432,6 +388,18 @@ impl MdnsDiscovery {
         }
         addrs
     }
+}
+
+async fn interfaces_v4() -> Vec<String> {
+    // Load current network interfaces state
+    let interfaces = netwatch::interfaces::State::new().await;
+
+    // Get the interface names (HashMap keys are the interface names)
+    interfaces
+        .interfaces
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 fn peer_to_discovery_item(peer: &Peer, node_id: &NodeId) -> DiscoveryItem {
