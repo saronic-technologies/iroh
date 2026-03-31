@@ -70,7 +70,7 @@ pkcs8 = "0.11.0-rc.9"
 iroh-metrics = { version = "0.38", default-features = false }
 
 # mdns
-swarm-discovery = { git = "https://github.com/saronic-technologies/swarm-discovery", rev = "ad2e0ebe2d172756badd40f02cf52d7b7dce7d37", optional = true }
+swarm-discovery = { git = "https://github.com/saronic-technologies/swarm-discovery", rev = "1b996e7764a8f84f5e2403a20650df6f0387360d", optional = true }
 futures-util = "0.3"
 
 # test_utils
