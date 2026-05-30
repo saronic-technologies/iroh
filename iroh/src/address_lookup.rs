@@ -501,6 +501,21 @@ impl ConcurrentAddressLookup {
         *self.addr_filter.write().expect("poisoned") = Some(filter);
     }
 
+    /// Returns a clone of the currently configured address filter, if any.
+    ///
+    /// Exposed so consumers outside the publish pipeline can apply the same
+    /// filter. Without this, [`set_addr_filter`] only gates what gets
+    /// published *outward* via lookup services (mDNS, pkarr, …) — but local
+    /// `DirectAddr` consumers (e.g. the QUIC NAT-traversal candidate
+    /// exchange, which reads `Socket::direct_addrs` directly) would see the
+    /// unfiltered set and could end up using addresses the operator
+    /// intended to exclude.
+    ///
+    /// [`set_addr_filter`]: Self::set_addr_filter
+    pub fn addr_filter(&self) -> Option<AddrFilter> {
+        self.addr_filter.read().expect("poisoned").clone()
+    }
+
     /// Adds an [`AddressLookup`] service.
     ///
     /// If there is historical Address Lookup data, it will be published immediately on this service.
