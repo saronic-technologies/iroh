@@ -510,7 +510,33 @@ impl Socket {
     ///
     /// If the direct addresses have changed from the previous set, they are published to
     /// the address lookup system.
-    fn store_direct_addresses(&self, addrs: BTreeSet<DirectAddr>) {
+    ///
+    /// The configured [`AddrFilter`] (set on the endpoint's
+    /// [`ConcurrentAddressLookup`]) is applied here, *before* storing.
+    /// Filtering at this point — not only at publish time — is what keeps
+    /// the filter honest for downstream consumers that read `direct_addrs`
+    /// directly, most importantly the QUIC NAT-traversal candidate exchange:
+    /// if it sees an excluded address, it advertises it to the peer in-band
+    /// over the already-established QUIC connection, the peer probes it, and
+    /// we end up using a path the filter was meant to forbid.
+    ///
+    /// [`AddrFilter`]: crate::address_lookup::AddrFilter
+    /// [`ConcurrentAddressLookup`]: crate::address_lookup::ConcurrentAddressLookup
+    fn store_direct_addresses(&self, mut addrs: BTreeSet<DirectAddr>) {
+        if let Some(filter) = self.address_lookup.addr_filter() {
+            let transport_addrs: Vec<TransportAddr> =
+                addrs.iter().map(|d| TransportAddr::Ip(d.addr)).collect();
+            let surviving: BTreeSet<SocketAddr> = filter
+                .apply(&transport_addrs)
+                .into_owned()
+                .into_iter()
+                .filter_map(|t| match t {
+                    TransportAddr::Ip(sa) => Some(sa),
+                    _ => None,
+                })
+                .collect();
+            addrs.retain(|d| surviving.contains(&d.addr));
+        }
         let updated = self.direct_addrs.update(addrs);
         if updated {
             self.publish_my_addr();
