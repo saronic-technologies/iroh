@@ -108,13 +108,13 @@ pub use self::{
         ConnectionClose, ConnectionError, ConnectionStats, Controller, ControllerFactory,
         ControllerMetrics, CryptoError, DecryptedInitial, Dir, ExportKeyingMaterialError,
         FrameStats, FrameType, HandshakeTokenKey, HeaderKey, IdleTimeout, IncomingAlpns, Keys,
-        MtuDiscoveryConfig, OpenBi, OpenUni, PacketKey, PathId, PathStats, QuicConnectError,
-        QuicTransportConfig, QuicTransportConfigBuilder, ReadDatagram, ReadError, ReadExactError,
-        ReadToEndError, RecvStream, ResetError, RttEstimator, SendDatagram, SendDatagramError,
-        SendStream, ServerConfig, ServerConfigBuilder, Side, StoppedError, StreamId, TimeSource,
-        TokenLog, TokenReuseError, TransportError, TransportErrorCode, TransportParameters,
-        UdpStats, UnorderedRecvStream, UnsupportedVersion, ValidationTokenConfig, VarInt,
-        VarIntBoundsExceeded, WriteError,
+        MtuDiscoveryConfig, ObservedExternalAddr, OpenBi, OpenUni, PacketKey, PathId, PathStats,
+        QuicConnectError, QuicTransportConfig, QuicTransportConfigBuilder, ReadDatagram, ReadError,
+        ReadExactError, ReadToEndError, RecvStream, ResetError, RttEstimator, SendDatagram,
+        SendDatagramError, SendStream, ServerConfig, ServerConfigBuilder, Side, StoppedError,
+        StreamId, TimeSource, TokenLog, TokenReuseError, TransportError, TransportErrorCode,
+        TransportParameters, UdpStats, UnorderedRecvStream, UnsupportedVersion,
+        ValidationTokenConfig, VarInt, VarIntBoundsExceeded, WriteError,
     },
 };
 #[cfg(not(wasm_browser))]
@@ -2060,7 +2060,8 @@ mod tests {
         address_lookup::memory::MemoryLookup,
         endpoint::{
             ApplicationClose, BindError, BindOpts, ConnectError, ConnectOptions,
-            ConnectWithOptsError, Connection, ConnectionError, PathEvent, PathEventStream, presets,
+            ConnectWithOptsError, Connection, ConnectionError, PathEvent, PathEventStream,
+            QuicTransportConfig, presets,
         },
         protocol::{AcceptError, ProtocolHandler, Router},
         test_utils::{
@@ -2426,6 +2427,89 @@ mod tests {
             conn_closed,
             ConnectionError::ApplicationClosed(ApplicationClose { .. })
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn endpoint_qad_observed_address_direct() -> Result {
+        // QUIC Address Discovery over a direct connection: a *reporting* endpoint
+        // tells the peer the address it observes for it, and the receiving endpoint
+        // surfaces that observation via [`Connection::observed_address`]. Validated
+        // by binding real endpoints
+
+        // Reporter: sends OBSERVED_ADDRESS frames
+        let reporter = {
+            let span = info_span!("reporter");
+            let _guard = span.enter();
+            Endpoint::builder(presets::N0)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .transport_config(
+                    QuicTransportConfig::builder()
+                        .send_observed_address_reports(true)
+                        .receive_observed_address_reports(true)
+                        .build(),
+                )
+                .bind()
+                .await?
+        };
+        let reporter_addr = reporter.addr();
+
+        // Receiver: only receives reports
+        let receiver = {
+            let span = info_span!("receiver");
+            let _guard = span.enter();
+            Endpoint::builder(presets::N0)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .transport_config(
+                    QuicTransportConfig::builder()
+                        .receive_observed_address_reports(true)
+                        .build(),
+                )
+                .bind()
+                .await?
+        };
+
+        // The QAD observation is driven by path validation at the QUIC layer,
+        // so no application traffic is needed: the reporter just holds the
+        // connection open, the receiver reads its observation and closes.
+        #[instrument(name = "reporter", skip_all)]
+        async fn accept(ep: Endpoint) -> Result {
+            let conn = ep.accept().await.anyerr()?.await.anyerr()?;
+            // Returns when the receiver closes; the application close is the
+            // expected outcome, not an error to propagate.
+            let _ = conn.closed().await;
+            Ok(())
+        }
+
+        #[instrument(name = "receiver", skip_all)]
+        async fn connect(ep: Endpoint, dst: EndpointAddr) -> Result<Option<SocketAddr>> {
+            let conn = ep.connect(dst, TEST_ALPN).await?;
+            let mut observed = conn.observed_address();
+            let addr = match observed.get() {
+                Some(addr) => Some(addr),
+                None => time::timeout(Duration::from_secs(5), observed.next())
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            conn.close(0u32.into(), b"done");
+            Ok(addr)
+        }
+
+        let accept_task = tokio::spawn(accept(reporter.clone()));
+        let observed = tokio::spawn(connect(receiver.clone(), reporter_addr))
+            .await
+            .anyerr()??;
+        accept_task.await.anyerr()??;
+
+        let observed = observed.expect("receiver received no QAD observed-address report");
+        info!(%observed, "QAD observation received");
+        assert!(!observed.ip().is_unspecified());
+        assert_ne!(observed.port(), 0);
 
         Ok(())
     }
