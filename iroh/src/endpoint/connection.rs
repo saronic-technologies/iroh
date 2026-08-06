@@ -33,7 +33,7 @@ use noq::WeakConnectionHandle as NoqWeakConnectionHandle;
 use pin_project::pin_project;
 use tracing::event;
 
-use super::quic::DecryptedInitial;
+use super::quic::{DecryptedInitial, ObservedExternalAddr};
 use crate::{
     Endpoint,
     endpoint::{
@@ -990,6 +990,30 @@ impl<T: ConnectionState> Connection<T> {
     #[inline]
     pub fn congestion_state(&self, path_id: PathId) -> Option<Box<dyn Controller>> {
         self.inner.congestion_state(path_id)
+    }
+
+    /// Watches this connection's external address as observed and reported by
+    /// the peer via QUIC Address Discovery
+    /// (`draft-ietf-quic-address-discovery`).
+    ///
+    /// The returned handle exposes the most recent observation via
+    /// [`ObservedExternalAddr::get`] (highest-sequence wins; resolved inside
+    /// the QUIC layer) and implements [`Stream`] to await subsequent changes,
+    /// e.g. after a NAT rebind or path migration.
+    ///
+    /// A value is only ever produced when the peer negotiated address-discovery
+    /// *reporting* — see
+    /// [`QuicTransportConfigBuilder::send_observed_address_reports`] on the
+    /// reporting side and
+    /// [`QuicTransportConfigBuilder::receive_observed_address_reports`] on this
+    /// side. Against a peer that does not report, this never yields an address.
+    ///
+    /// [`Stream`]: futures_util::Stream
+    /// [`QuicTransportConfigBuilder::send_observed_address_reports`]: crate::endpoint::QuicTransportConfigBuilder::send_observed_address_reports
+    /// [`QuicTransportConfigBuilder::receive_observed_address_reports`]: crate::endpoint::QuicTransportConfigBuilder::receive_observed_address_reports
+    #[inline]
+    pub fn observed_address(&self) -> ObservedExternalAddr {
+        self.inner.observed_external_addr()
     }
 
     /// Parameters negotiated during the handshake.

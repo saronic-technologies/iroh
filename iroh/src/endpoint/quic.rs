@@ -23,6 +23,7 @@ pub use noq::{
     Dir,                  // noq::StreamId
     IdleTimeout,          // iroh::endpoint::quic::QuicTransportConfig
     MtuDiscoveryConfig,   // iroh::endpoint::quic::QuicTransportConfig
+    ObservedExternalAddr, // iroh::endpoint::Connection
     OpenBi,               // iroh::endpoint::Connection
     OpenUni,              // iroh::endpoint::Connection
     PathStats,            // iroh::socket::remote_map::remote_state::PathInfo
