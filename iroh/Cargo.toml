@@ -37,7 +37,7 @@ iroh-relay = { version = "1.0.1", path = "../iroh-relay", default-features = fal
 n0-future = "0.3"
 n0-error = "1.0.0"
 n0-watcher = "1.0.0"
-netwatch = { git = "https://github.com/saronic-technologies/net-tools/", rev = "5551fa53816269423a4350650348c5b4ed54ff02" }
+netwatch = { git = "https://github.com/saronic-technologies/net-tools/", rev = "0015d85c818ce15204b31cc464af0a20d064cbb3" }
 papaya = { version = "0.2.3", default-features = false }
 pin-project = "1"
 portable-atomic = "1"
