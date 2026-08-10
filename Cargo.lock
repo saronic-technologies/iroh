@@ -2291,10 +2291,10 @@ dependencies = [
  "n0-future",
  "n0-tracing-test",
  "n0-watcher",
- "netwatch",
+ "netwatch 0.19.1 (git+https://github.com/saronic-technologies/net-tools/?rev=0015d85c818ce15204b31cc464af0a20d064cbb3)",
  "noq",
  "noq-proto",
- "noq-udp",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e)",
  "papaya",
  "parse-size",
  "patchbay",
@@ -3081,7 +3081,43 @@ dependencies = [
  "netlink-packet-route 0.31.0",
  "netlink-proto",
  "netlink-sys",
- "noq-udp",
+ "noq-udp 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "objc2-core-foundation",
+ "objc2-system-configuration",
+ "pin-project-lite",
+ "serde",
+ "socket2",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "web-sys",
+ "windows",
+ "windows-result",
+ "wmi",
+]
+
+[[package]]
+name = "netwatch"
+version = "0.19.1"
+source = "git+https://github.com/saronic-technologies/net-tools/?rev=0015d85c818ce15204b31cc464af0a20d064cbb3#0015d85c818ce15204b31cc464af0a20d064cbb3"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "cfg_aliases",
+ "derive_more",
+ "ipnet",
+ "js-sys",
+ "libc",
+ "n0-error",
+ "n0-future",
+ "n0-watcher",
+ "netdev",
+ "netlink-packet-core",
+ "netlink-packet-route 0.31.0",
+ "netlink-proto",
+ "netlink-sys",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e)",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "pin-project-lite",
@@ -3146,14 +3182,13 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 [[package]]
 name = "noq"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bf95190af1bd4a00a10e8255ca0c8ddd9e9a9f5e79151d7a7eb6d56aff5dc89"
+source = "git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e#f359116009362c9bada65f10e93f68517619d39e"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "derive_more",
  "noq-proto",
- "noq-udp",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e)",
  "pin-project-lite",
  "rustc-hash",
  "rustls",
@@ -3168,8 +3203,7 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa6c890013591e709a3e45dd53501351b7e27e7ff3c7e9fc3dce43e300e7e9d3"
+source = "git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e#f359116009362c9bada65f10e93f68517619d39e"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -3201,6 +3235,18 @@ name = "noq-udp"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3137a52df66c20090a889828d1c655f21f52294cba64e5c4fbb04fc83eee7c8e"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "socket2",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "noq-udp"
+version = "1.0.1"
+source = "git+https://github.com/saronic-technologies/noq?rev=f359116009362c9bada65f10e93f68517619d39e#f359116009362c9bada65f10e93f68517619d39e"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3681,7 +3727,7 @@ dependencies = [
  "libc",
  "n0-error",
  "n0-future",
- "netwatch",
+ "netwatch 0.19.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "num_enum",
  "rand 0.10.1",
  "serde",
