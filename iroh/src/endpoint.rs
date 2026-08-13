@@ -1244,6 +1244,18 @@ impl Endpoint {
         self.msock.network_change().await;
     }
 
+    /// Like [`Endpoint::network_change`], but treats the change as authoritative
+    /// instead of re-checking interfaces. With `is_major` the UDP sockets are
+    /// rebound, the DNS cache cleared, stale relay connections closed and
+    /// per-node path state reset; otherwise only a re-STUN is triggered.
+    ///
+    /// Needed on Android: netmon has no OS route monitor there and its interface
+    /// enumeration cannot see network changes. So we need mechanism to update
+    /// connections by request.
+    pub async fn force_network_change(&self, is_major: bool) {
+        self.msock.force_network_change(is_major).await;
+    }
+
     // # Methods to update internal state.
 
     /// Sets the initial user-defined data to be published in discovery services for this node.
