@@ -468,8 +468,8 @@ impl MagicSock {
         &self.discovery_subscribers
     }
 
-    #[cfg(test)]
-    async fn force_network_change(&self, is_major: bool) {
+    /// Like [`Self::network_change`], but bypasses netmon's interface diff.
+    pub(crate) async fn force_network_change(&self, is_major: bool) {
         self.actor_sender
             .send(ActorMessage::ForceNetworkChange(is_major))
             .await
@@ -2325,7 +2325,6 @@ enum ActorMessage {
     EndpointPingExpired(usize, stun_rs::TransactionId),
     NetReport(Result<Option<Arc<net_report::Report>>>, &'static str),
     NetworkChange,
-    #[cfg(test)]
     ForceNetworkChange(bool),
 }
 
@@ -2661,7 +2660,6 @@ impl Actor {
             ActorMessage::NetworkChange => {
                 self.network_monitor.network_change().await.ok();
             }
-            #[cfg(test)]
             ActorMessage::ForceNetworkChange(is_major) => {
                 self.handle_network_change(is_major).await;
             }
