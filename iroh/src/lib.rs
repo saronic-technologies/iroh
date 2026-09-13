@@ -302,5 +302,23 @@ pub mod unstable_net_report {
     pub use crate::net_report::{Probe, RelayLatencies, Report as NetReport};
 }
 
+#[cfg(all(not(wasm_browser), feature = "unstable-udp-delegation"))]
+pub mod unstable_udp_delegation {
+    //! Delegated receive path for the endpoint's UDP sockets.
+    //!
+    //! Enabled via [`Builder::delegate_udp_recv`]; handles are obtained from
+    //! [`Endpoint::delegated_udp_sockets`].  See the docs on the types below and
+    //! `DATAPLANE.md` in the repository root for the receiver contract and the
+    //! overall design.
+    //!
+    //! This API is unstable and gated behind the `unstable-udp-delegation` feature.
+    //! It is not covered by semantic versioning guarantees and may change in any
+    //! release without a major version bump.
+    //!
+    //! [`Builder::delegate_udp_recv`]: crate::endpoint::Builder::delegate_udp_recv
+    //! [`Endpoint::delegated_udp_sockets`]: crate::endpoint::Endpoint::delegated_udp_sockets
+    pub use crate::socket::delegation::{DelegatedUdpSocket, InjectError};
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
