@@ -153,6 +153,8 @@ pub struct Builder {
     net_report_config: NetReportConfig,
     crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
     configured_addrs: BTreeSet<SocketAddr>,
+    #[cfg(not(wasm_browser))]
+    delegate_udp_recv: bool,
 }
 
 impl From<RelayMode> for Option<TransportConfig> {
@@ -223,6 +225,8 @@ impl Builder {
             net_report_config: Default::default(),
             crypto_provider: None,
             configured_addrs: Default::default(),
+            #[cfg(not(wasm_browser))]
+            delegate_udp_recv: false,
         }
     }
 
@@ -291,6 +295,8 @@ impl Builder {
             net_report_config: self.net_report_config,
             static_config,
             configured_addrs: self.configured_addrs,
+            #[cfg(not(wasm_browser))]
+            delegate_udp_recv: self.delegate_udp_recv,
         };
 
         let inner = socket::EndpointInner::bind(sock_opts)
@@ -847,6 +853,36 @@ impl Builder {
     #[cfg(feature = "unstable-custom-transports")]
     pub fn add_custom_transport(mut self, factory: Arc<dyn CustomTransport>) -> Self {
         self.transports.push(TransportConfig::Custom(factory));
+        self
+    }
+
+    /// Delegates the receive path of the endpoint's UDP sockets to an external receiver.
+    ///
+    /// With delegation enabled the endpoint stops reading its IP sockets entirely.
+    /// After [`bind`], [`Endpoint::delegated_udp_sockets`] returns one handle per
+    /// bound socket; their holder **must** continuously poll them, consume any
+    /// non-QUIC datagrams (first byte `0x00..=0x3F`), and re-inject all QUIC
+    /// packets via [`DelegatedUdpSocket::inject_received`] — otherwise the
+    /// endpoint receives nothing and connections, address discovery and
+    /// holepunching silently stall.
+    ///
+    /// This exists to multiplex a non-QUIC dataplane over the same UDP 4-tuple
+    /// as the endpoint's QUIC traffic. See `DATAPLANE.md` in the repository
+    /// root for the design and [`crate::unstable_udp_delegation`] for the API.
+    ///
+    /// <div class="warning">
+    ///
+    /// This API is unstable and gated behind the `unstable-udp-delegation` feature.
+    /// It is not covered by semantic versioning guarantees and may change in any release
+    /// without a major version bump.
+    ///
+    /// </div>
+    ///
+    /// [`bind`]: Builder::bind
+    /// [`DelegatedUdpSocket::inject_received`]: crate::unstable_udp_delegation::DelegatedUdpSocket::inject_received
+    #[cfg(all(not(wasm_browser), feature = "unstable-udp-delegation"))]
+    pub fn delegate_udp_recv(mut self) -> Self {
+        self.delegate_udp_recv = true;
         self
     }
 
@@ -1480,6 +1516,25 @@ impl Endpoint {
             .into_iter()
             .filter_map(|addr| addr.into_socket_addr())
             .collect()
+    }
+
+    /// Returns the handles to the endpoint's delegated UDP sockets.
+    ///
+    /// Returns one handle per bound IP socket (typically one IPv4 and one IPv6).
+    /// Empty unless the endpoint was built with [`Builder::delegate_udp_recv`].
+    ///
+    /// See [`crate::unstable_udp_delegation`] for the receiver contract.
+    ///
+    /// <div class="warning">
+    ///
+    /// This API is unstable and gated behind the `unstable-udp-delegation` feature.
+    /// It is not covered by semantic versioning guarantees and may change in any release
+    /// without a major version bump.
+    ///
+    /// </div>
+    #[cfg(all(not(wasm_browser), feature = "unstable-udp-delegation"))]
+    pub fn delegated_udp_sockets(&self) -> Vec<crate::unstable_udp_delegation::DelegatedUdpSocket> {
+        self.inner.delegated_udp_sockets().to_vec()
     }
 
     // # Methods for less common getters.

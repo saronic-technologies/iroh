@@ -91,6 +91,9 @@ mod metrics;
 
 pub(crate) mod biased_rtt_path_selector;
 pub(crate) mod concurrent_read_map;
+#[cfg(not(wasm_browser))]
+#[cfg_attr(not(feature = "unstable-udp-delegation"), allow(dead_code))]
+pub(crate) mod delegation;
 pub(crate) mod mapped_addrs;
 pub(crate) mod remote_map;
 pub(crate) mod transports;
@@ -197,6 +200,12 @@ pub(crate) struct Options {
 
     /// Explicitly configured external addresses to advertise.
     pub(crate) configured_addrs: BTreeSet<SocketAddr>,
+
+    /// Whether to delegate the receive path of the IP sockets.
+    ///
+    /// See [`delegation`].
+    #[cfg(not(wasm_browser))]
+    pub(crate) delegate_udp_recv: bool,
 }
 
 /// Inner state for an iroh [`crate::Endpoint`].
@@ -364,6 +373,12 @@ pub(crate) struct Socket {
     /// Currently bound IP addresses of all sockets
     #[cfg(not(wasm_browser))]
     ip_bind_addrs: Vec<SocketAddr>,
+    /// Handles to the delegated IP sockets, empty unless delegation is enabled.
+    ///
+    /// See [`delegation`].
+    #[cfg(not(wasm_browser))]
+    #[cfg_attr(not(feature = "unstable-udp-delegation"), allow(dead_code))]
+    delegated_udp: Vec<delegation::DelegatedUdpSocket>,
     /// The DNS resolver to be used in this socket.
     #[cfg(not(wasm_browser))]
     dns_resolver: DnsResolver,
@@ -417,6 +432,15 @@ impl Socket {
     /// Get the cached version of addresses.
     pub(crate) fn local_addr(&self) -> Vec<transports::Addr> {
         self.local_addrs_watch.clone().get()
+    }
+
+    /// Handles to the delegated IP sockets.
+    ///
+    /// Empty unless delegation was enabled at bind time. See [`delegation`].
+    #[cfg(not(wasm_browser))]
+    #[cfg_attr(not(feature = "unstable-udp-delegation"), allow(dead_code))]
+    pub(crate) fn delegated_udp_sockets(&self) -> &[delegation::DelegatedUdpSocket] {
+        &self.delegated_udp
     }
 
     #[cfg(not(wasm_browser))]
@@ -921,6 +945,8 @@ impl EndpointInner {
             net_report_config,
             static_config,
             configured_addrs,
+            #[cfg(not(wasm_browser))]
+            delegate_udp_recv,
         } = opts;
 
         let address_lookup = address_lookup::AddressLookupServices::default();
@@ -965,13 +991,23 @@ impl EndpointInner {
         let shutdown_state = ShutdownState::default();
         let shutdown_token = shutdown_state.at_endpoint_closed.child_token();
 
-        let transports = Transports::bind(
+        #[cfg_attr(wasm_browser, allow(unused_mut))]
+        let mut transports = Transports::bind(
             &transport_configs,
             relay_actor_config,
             &metrics,
             shutdown_token.child_token(),
         )
         .map_err(|err| e!(BindError::Sockets, err))?;
+
+        // Delegate the IP receive path before the noq endpoint starts polling,
+        // so the endpoint never reads the sockets itself. See [`delegation`].
+        #[cfg(not(wasm_browser))]
+        let delegated_udp = if delegate_udp_recv {
+            transports.delegate_udp_recv()
+        } else {
+            Vec::new()
+        };
 
         if let Some(v4_port) = transports.local_addrs().into_iter().find_map(|t| {
             if let transports::Addr::Ip(SocketAddr::V4(addr)) = t {
@@ -1033,6 +1069,8 @@ impl EndpointInner {
             home_relay_watch,
             #[cfg(not(wasm_browser))]
             ip_bind_addrs: transports.ip_bind_addrs(),
+            #[cfg(not(wasm_browser))]
+            delegated_udp,
             tls_config: tls_config.clone(),
             hooks,
             span: span.clone(),
@@ -1045,6 +1083,11 @@ impl EndpointInner {
         // For performance reasons and to not rewrite buffers we pass non-QUIC UDP packets straight
         // through to noq. We set the first byte of the packet to zero, which makes noq ignore
         // the packet if grease_quic_bit is set to false.
+        //
+        // The delegated receive path (see [`delegation`] and DATAPLANE.md) additionally relies
+        // on this: with greasing disabled, every QUIC packet on the wire has bit 0x40 set in
+        // its first byte, so first bytes 0x00..=0x3F are free for non-QUIC datagrams sharing
+        // the socket. Do not remove this without revisiting that design.
         endpoint_config.grease_quic_bit(false);
 
         let local_addrs_watch = transports.local_addrs_watch();
@@ -2213,6 +2256,8 @@ mod tests {
             net_report_config: Default::default(),
             static_config,
             configured_addrs: Default::default(),
+            #[cfg(not(wasm_browser))]
+            delegate_udp_recv: false,
         }
     }
 
@@ -2630,6 +2675,8 @@ mod tests {
             net_report_config: Default::default(),
             static_config,
             configured_addrs: Default::default(),
+            #[cfg(not(wasm_browser))]
+            delegate_udp_recv: false,
         };
         let sock = EndpointInner::bind(opts).await?;
         Ok(sock)

@@ -14,7 +14,10 @@ use pin_project::pin_project;
 use tracing::{debug, info, trace};
 
 use super::{RecvInfo, Transmit};
-use crate::metrics::{EndpointMetrics, SocketMetrics};
+use crate::{
+    metrics::{EndpointMetrics, SocketMetrics},
+    socket::delegation::{DelegatedUdpSocket, INJECTION_QUEUE_CAP, InjectionReceiver},
+};
 
 #[derive(Debug)]
 pub(crate) struct IpTransport {
@@ -22,6 +25,10 @@ pub(crate) struct IpTransport {
     socket: Arc<UdpSocket>,
     local_addr: Watchable<SocketAddr>,
     metrics: Arc<SocketMetrics>,
+    /// When set, the socket's receive path is delegated: [`Self::poll_recv`]
+    /// reads re-injected QUIC datagrams from this queue instead of the socket.
+    /// See [`crate::socket::delegation`].
+    delegated_rx: Option<InjectionReceiver>,
 }
 
 /// IP transport configuration
@@ -178,7 +185,24 @@ impl IpTransport {
             socket: Arc::new(socket),
             local_addr,
             metrics,
+            delegated_rx: None,
         })
+    }
+
+    /// Delegates this transport's receive path to an external receiver.
+    ///
+    /// After this call [`Self::poll_recv`] no longer reads the socket; it only
+    /// yields QUIC datagrams injected through the returned handle.  The handle
+    /// becomes the sole reader of the socket.  See [`crate::socket::delegation`].
+    pub(crate) fn delegate_recv(&mut self) -> DelegatedUdpSocket {
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::channel(INJECTION_QUEUE_CAP);
+        self.delegated_rx = Some(inject_rx);
+        DelegatedUdpSocket::new(
+            self.socket.clone(),
+            self.bind_addr(),
+            self.local_addr.watch(),
+            inject_tx,
+        )
     }
 
     /// NOTE: Receiving on a closed socket will return [`Poll::Pending`] indefinitely.
@@ -195,6 +219,9 @@ impl IpTransport {
             recv_infos.len(),
             "non matching bufs & recv_infos"
         );
+        if self.delegated_rx.is_some() {
+            return self.poll_recv_delegated(cx, bufs, metas, recv_infos);
+        }
         match self.socket.poll_recv_noq(cx, bufs, metas) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(n)) => {
@@ -220,6 +247,65 @@ impl IpTransport {
                 Poll::Ready(Ok(n))
             }
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+        }
+    }
+
+    /// Receives datagrams from the injection queue instead of the socket.
+    ///
+    /// Used when the receive path is delegated (see [`Self::delegate_recv`]).
+    /// Applies the same address conventions as the socket receive path above:
+    /// `meta.addr` is IPv4-mapped for Noq, the [`RecvInfo`] carries the
+    /// canonical address.
+    fn poll_recv_delegated(
+        &mut self,
+        cx: &mut Context,
+        bufs: &mut [io::IoSliceMut<'_>],
+        metas: &mut [noq_udp::RecvMeta],
+        recv_infos: &mut [RecvInfo],
+    ) -> Poll<io::Result<usize>> {
+        let rx = self.delegated_rx.as_mut().expect("checked by caller");
+        let mut count = 0;
+        while count < bufs.len() {
+            match rx.poll_recv(cx) {
+                Poll::Ready(Some(dgram)) => {
+                    let buf = &mut bufs[count];
+                    let len = dgram.payload.len();
+                    if len > buf.len() {
+                        debug!(len, "dropping oversized injected datagram");
+                        continue;
+                    }
+                    buf[..len].copy_from_slice(&dgram.payload);
+                    let meta = &mut metas[count];
+                    *meta = noq_udp::RecvMeta::default();
+                    // Mirror the socket receive path above: IPv4 sources are shown as
+                    // IPv4-mapped IPv6 addresses since Noq uses those when sending on
+                    // an INET6 socket, while IPv6 sources are passed through untouched
+                    // (preserving scope id and flowinfo of e.g. link-local peers).
+                    meta.addr = match dgram.src {
+                        SocketAddr::V4(addr) => {
+                            SocketAddr::new(addr.ip().to_ipv6_mapped().into(), addr.port())
+                        }
+                        SocketAddr::V6(_) => dgram.src,
+                    };
+                    meta.len = len;
+                    meta.stride = len;
+                    meta.ecn = dgram.ecn;
+                    meta.dst_ip = dgram.dst_ip;
+                    recv_infos[count] = RecvInfo::from_addr(
+                        SocketAddr::new(dgram.src.ip().to_canonical(), dgram.src.port()).into(),
+                    );
+                    count += 1;
+                }
+                // Ready(None) means all handles are dropped; per the contract in
+                // [`crate::socket::delegation`] we then behave like a closed
+                // socket: pending indefinitely.
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        if count > 0 {
+            Poll::Ready(Ok(count))
+        } else {
+            Poll::Pending
         }
     }
 

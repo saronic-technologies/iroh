@@ -476,6 +476,16 @@ impl Transports {
         }
     }
 
+    /// Delegates the receive path of all IP transports to external receivers.
+    ///
+    /// Returns one [`DelegatedUdpSocket`] handle per bound IP socket.  After
+    /// this call the endpoint no longer reads the IP sockets itself; see
+    /// [`crate::socket::delegation`] for the contract.
+    #[cfg(not(wasm_browser))]
+    pub(crate) fn delegate_udp_recv(&mut self) -> Vec<crate::socket::delegation::DelegatedUdpSocket> {
+        self.ip.iter_mut().map(|t| t.delegate_recv()).collect()
+    }
+
     /// Handles potential changes to the underlying network conditions.
     pub(crate) fn create_network_change_sender(&self) -> NetworkChangeSender {
         NetworkChangeSender {
