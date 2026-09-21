@@ -486,6 +486,16 @@ impl RemoteStateActor {
         if self.connections.is_empty() {
             trace!("last connection closed - clearing selected_path");
             self.state.selected_path = None;
+        } else {
+            // A non-last connection closed. Its paths are gone from the
+            // candidate set, but `selected_path` may still name one of them
+            // (e.g. a superseded tie-break loser closed while another
+            // connection to this endpoint remains). Re-select so we fail
+            // over onto a surviving connection instead of stranding TX on a
+            // dead path — otherwise nothing re-evaluates the selection until
+            // some later path event, and forwarding to this endpoint stays
+            // black-holed.
+            self.select_path();
         }
     }
 
