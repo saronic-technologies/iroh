@@ -320,4 +320,18 @@ mod tests {
         let v4 = v4(1);
         assert_eq!(select_with_default(Some(&v4), vec![]), None);
     }
+
+    #[test]
+    fn stale_current_absent_from_candidates_switches_to_survivor() {
+        // The selection failover that `RemoteStateActor::handle_connection_close`
+        // relies on: when the currently-selected path is no longer among the live
+        // candidates (its connection closed — e.g. a superseded tie-break loser)
+        // but another path remains, the selector must switch to the survivor
+        // rather than pinning the dead tuple. Without this, forwarding to the
+        // endpoint stays black-holed on the closed path.
+        let dead = v4(1);
+        let survivor = v4(2);
+        let chosen = select_with_default(Some(&dead), vec![psd(&survivor, 10)]);
+        assert_eq!(chosen.as_ref(), Some(&survivor));
+    }
 }
