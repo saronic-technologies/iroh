@@ -100,9 +100,24 @@ PMTUD on this path, and `may_fragment()` reports whether the OS might fragment.
 A consumer that addresses remote endpoints directly needs to know where to
 send: subscribe to `Connection::path_events()` / `Connection::paths()`.
 `PathEvent::Selected` carries the concrete remote `TransportAddr` (a real
-`SocketAddr` for IP paths) and fires on migration. When the selected path is a
+`SocketAddr` for IP paths) and fires whenever the selected path changes —
+including when the selected path itself migrates. When the selected path is a
 relay, there is no direct UDP path — fall back to QUIC datagrams for that
 remote or treat it as unreachable.
+
+Migration covers the case where a path keeps its `PathId` but its address
+changes: when the remote's packets start arriving from a new address (e.g. a
+NAT rebinding), noq moves the path in place and, once path validation confirms
+the remote at the new address, reports it. iroh then emits
+`PathEvent::Migrated` (old and new addresses) and re-emits
+`PathEvent::Selected` with the new address if the path is selected. A spoofed
+source address never surfaces: it fails validation. Until validation completes
+(about one round trip), the path is still reported at its old address.
+
+The event stream is bounded: a consumer that falls behind gets a single
+`PathEvent::Lagged` in place of the events it missed, and should re-read
+`Connection::paths()` to recover. Subscribe to the events before reading the
+initial `Connection::paths()`, so that no change falls between the two.
 
 ## Dependency pass-through
 
