@@ -1149,7 +1149,8 @@ impl Connection<HandshakeCompleted> {
     ///
     /// Each event reports one of: a path opened, a path closed (with
     /// final per-path statistics), the selected transmission path
-    /// changed, or the consumer fell behind. The stream ends when the
+    /// changed, an open path migrated to a new network path, or the
+    /// consumer fell behind. The stream ends when the
     /// connection closes. It does not borrow this [`Connection`] and
     /// may be moved into a spawned task.
     ///

@@ -37,13 +37,13 @@ iroh-relay = { version = "1.0.1", path = "../iroh-relay", default-features = fal
 n0-future = "0.3"
 n0-error = "1.0.0"
 n0-watcher = "1.0.0"
-netwatch = { git = "https://github.com/saronic-technologies/net-tools/", rev = "0015d85c818ce15204b31cc464af0a20d064cbb3" }
+netwatch = { git = "https://github.com/saronic-technologies/net-tools/", rev = "2b560b994a1f9658d2a71dab343dbb64bf801039" }
 papaya = { version = "0.2.3", default-features = false }
 pin-project = "1"
 portable-atomic = "1"
-noq = { git = "https://github.com/saronic-technologies/noq", rev = "f359116009362c9bada65f10e93f68517619d39e", default-features = false, features = ["rustls"] }
-noq-proto = { git = "https://github.com/saronic-technologies/noq", rev = "f359116009362c9bada65f10e93f68517619d39e", default-features = false }
-noq-udp = { git = "https://github.com/saronic-technologies/noq", rev = "f359116009362c9bada65f10e93f68517619d39e", default-features = false }
+noq = { git = "https://github.com/saronic-technologies/noq", rev = "cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f", default-features = false, features = ["rustls"] }
+noq-proto = { git = "https://github.com/saronic-technologies/noq", rev = "cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f", default-features = false }
+noq-udp = { git = "https://github.com/saronic-technologies/noq", rev = "cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f", default-features = false }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustc-hash = "2"
@@ -76,7 +76,7 @@ axum = { version = "0.8", optional = true }
 
 hickory-resolver = { version = "0.26.0", default-features = false }
 portmapper = { version = "0.19.1", optional = true, default-features = false }
-noq = { git = "https://github.com/saronic-technologies/noq", rev = "f359116009362c9bada65f10e93f68517619d39e", default-features = false, features = ["runtime-tokio", "rustls"] }
+noq = { git = "https://github.com/saronic-technologies/noq", rev = "cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f", default-features = false, features = ["runtime-tokio", "rustls"] }
 tokio = { version = "1", features = [
     "io-util",
     "macros",

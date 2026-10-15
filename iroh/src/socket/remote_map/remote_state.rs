@@ -16,7 +16,9 @@ use n0_future::{
 };
 use n0_watcher::Watcher;
 use noq::{Closed, PathStats, PathStatus, WeakConnectionHandle};
-use noq_proto::{PathError, PathEvent as NoqPathEvent, PathId, n0_nat_traversal};
+use noq_proto::{
+    PathAbandonReason, PathError, PathEvent as NoqPathEvent, PathId, n0_nat_traversal,
+};
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -444,6 +446,9 @@ impl RemoteStateActor {
                 }
             }
         }
+        // noq drives the connection before it gets here, so other paths may already be
+        // established: their events were sent before we subscribed.
+        self.resync_paths(conn_id);
         self.trigger_holepunching();
         self.select_path();
         tx.send(path_state_receiver).ok();
@@ -579,11 +584,14 @@ impl RemoteStateActor {
 
     #[instrument(skip(self))]
     fn handle_path_event(&mut self, conn_id: ConnId, event: Result<NoqPathEvent, noq::Lagged>) {
-        let Ok(event) = event else {
-            warn!("missed a PathEvent, RemoteStateActor lagging");
-            // TODO: Is it possible to recover using the sync APIs to figure out what the
-            //    state of the connection and it's paths are?
-            return;
+        let event = match event {
+            Ok(event) => event,
+            Err(noq::Lagged(missed)) => {
+                warn!(missed, "missed path events, RemoteStateActor lagging");
+                self.resync_paths(conn_id);
+                self.select_path();
+                return;
+            }
         };
         let Some(conn_state) = self.connections.get_mut(&conn_id) else {
             trace!("event for removed connection");
@@ -596,6 +604,10 @@ impl RemoteStateActor {
         trace!("path event");
         match event {
             NoqPathEvent::Established { id: path_id, .. } => {
+                if conn_state.paths.contains_key(&path_id) {
+                    trace!(%path_id, "path already registered by a resync");
+                    return;
+                }
                 let Some(path) = conn.path(path_id) else {
                     trace!("path open event for unknown path");
                     return;
@@ -606,38 +618,27 @@ impl RemoteStateActor {
                 self.select_path();
             }
             NoqPathEvent::Abandoned { id, reason, .. } => {
-                // Remove abandoned path from the conn state.
-                let Some(network_path) = conn_state.remove_path(&id, &conn) else {
-                    debug!(%id, "path not in path_id_map");
-                    return;
-                };
-
-                // We track all known remote addresses for the peer in `State::paths`. The paths are tracked
-                // by remote address only (we ignore the local IP). Therefore, we mark a remote addr as abandoned
-                // in the remote-global state only once no connections have any path to that remote addr.
-                if !conn_state
-                    .paths
-                    .values()
-                    .any(|tuple| tuple.remote() == network_path.remote())
-                {
-                    self.state.paths.abandoned_path(&network_path.remote());
-                }
-
-                event!(
-                    target: "iroh::_events::path::abandoned",
-                    Level::DEBUG,
-                    remote = %self.state.endpoint_id.fmt_short(),
-                    %conn_id,
-                    path_id = %id,
-                    %network_path,
-                    ?reason
-                );
-
+                let was_tracked = self.handle_path_abandoned(conn_id, &conn, id, Some(reason));
                 // If the remote closed our selected path, select a new one.
-                self.select_path();
+                if was_tracked {
+                    self.select_path();
+                }
             }
             NoqPathEvent::Discarded { id, path_stats, .. } => {
                 trace!(%id, ?path_stats, "path discarded");
+            }
+            NoqPathEvent::Migrated {
+                id, network_path, ..
+            } => {
+                let Some(network_path) = transports::FourTuple::from_noq(
+                    network_path,
+                    &self.state.relay_mapped_addrs,
+                    &self.state.custom_mapped_addrs,
+                ) else {
+                    debug!(%id, "migrated path has an unknown network path");
+                    return;
+                };
+                self.handle_path_migrated(conn_id, id, network_path);
             }
             NoqPathEvent::RemoteStatus { .. } | NoqPathEvent::ObservedAddr { .. } => {
                 // Nothing to do for these events.
@@ -648,6 +649,179 @@ impl RemoteStateActor {
                 // know how to handle.
                 #[cfg(test)]
                 panic!("Unhandled path event: {event:?}");
+            }
+        }
+    }
+
+    /// Stops tracking a path that noq abandoned.
+    ///
+    /// The `reason` is unknown if the path was found abandoned by [`Self::resync_paths`].
+    /// Returns whether the path was tracked.
+    fn handle_path_abandoned(
+        &mut self,
+        conn_id: ConnId,
+        conn: &noq::Connection,
+        path_id: PathId,
+        reason: Option<PathAbandonReason>,
+    ) -> bool {
+        let Some(conn_state) = self.connections.get_mut(&conn_id) else {
+            return false;
+        };
+        // Remove abandoned path from the conn state.
+        let Some(network_path) = conn_state.remove_path(&path_id, conn) else {
+            debug!(%path_id, "path not in path_id_map");
+            return false;
+        };
+
+        // We track all known remote addresses for the peer in `State::paths`. The paths are tracked
+        // by remote address only (we ignore the local IP). Therefore, we mark a remote addr as abandoned
+        // in the remote-global state only once no connections have any path to that remote addr.
+        if !conn_state
+            .paths
+            .values()
+            .any(|tuple| tuple.remote() == network_path.remote())
+        {
+            self.state.paths.abandoned_path(&network_path.remote());
+        }
+
+        event!(
+            target: "iroh::_events::path::abandoned",
+            Level::DEBUG,
+            remote = %self.state.endpoint_id.fmt_short(),
+            %conn_id,
+            %path_id,
+            %network_path,
+            ?reason
+        );
+        true
+    }
+
+    /// Brings the tracked paths of a connection back in line with the paths noq has open.
+    ///
+    /// Recovers from missed path events: those emitted before the connection was added, and
+    /// those dropped from noq's bounded event channel when this actor falls behind. Applies
+    /// what the missed events would have, from noq's current state: abandoned paths are
+    /// dropped, established paths are registered and migrations are followed. Like the
+    /// events, this only ever uses network paths noq validated.
+    ///
+    /// The caller is responsible for selecting a path afterwards.
+    fn resync_paths(&mut self, conn_id: ConnId) {
+        let Some(conn) = self
+            .connections
+            .get(&conn_id)
+            .and_then(|conn_state| conn_state.handle.upgrade())
+        else {
+            return;
+        };
+        let open_paths: Vec<_> = conn
+            .open_paths()
+            .into_iter()
+            .map(|(path_id, network_path)| {
+                let network_path = network_path.and_then(|network_path| {
+                    transports::FourTuple::from_noq(
+                        network_path,
+                        &self.state.relay_mapped_addrs,
+                        &self.state.custom_mapped_addrs,
+                    )
+                });
+                (path_id, network_path)
+            })
+            .collect();
+        let Some(conn_state) = self.connections.get(&conn_id) else {
+            return;
+        };
+        let changes = path_changes(&conn_state.paths, &open_paths);
+        if !changes.is_empty() {
+            debug!(%conn_id, ?changes, "resyncing paths");
+        }
+        for change in changes {
+            match change {
+                PathChange::Abandoned(path_id) => {
+                    self.handle_path_abandoned(conn_id, &conn, path_id, None);
+                }
+                PathChange::Migrated(path_id, network_path) => {
+                    self.handle_path_migrated(conn_id, path_id, network_path);
+                }
+                PathChange::Established(path_id, network_path) => {
+                    let (Some(conn_state), Some(path)) =
+                        (self.connections.get_mut(&conn_id), conn.path(path_id))
+                    else {
+                        continue;
+                    };
+                    self.state.register_and_configure_network_path(
+                        conn_id,
+                        conn_state,
+                        &path,
+                        network_path,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Handles a path that noq migrated to a new, validated network path.
+    ///
+    /// The [`PathId`] stays the same while the remote's address changes, e.g. after its NAT
+    /// rebound. Everything that recorded the old four-tuple follows it, so the selected path
+    /// and the path watcher keep pointing at the address that actually carries the path.
+    fn handle_path_migrated(
+        &mut self,
+        conn_id: ConnId,
+        path_id: PathId,
+        network_path: transports::FourTuple,
+    ) {
+        let Some(conn_state) = self.connections.get_mut(&conn_id) else {
+            return;
+        };
+        let Some(recorded) = conn_state.paths.get_mut(&path_id) else {
+            trace!(%path_id, "migration of an untracked path");
+            return;
+        };
+        if *recorded == network_path {
+            return;
+        }
+        let prev = std::mem::replace(recorded, network_path.clone());
+        event!(
+            target: "iroh::_events::path::migrated",
+            Level::DEBUG,
+            remote = %self.state.endpoint_id.fmt_short(),
+            %conn_id,
+            %path_id,
+            %network_path,
+            prev_network_path = %prev,
+        );
+        conn_state
+            .path_state
+            .record_migrated(path_id, &network_path);
+
+        // Keep the selection on the migrated path: left on the old four-tuple, the next
+        // `apply_selected_path` would demote this path to backup and try to open a new path
+        // to the address the remote just left.
+        if self.state.selected_path.as_ref() == Some(&prev) {
+            self.state.selected_path = Some(network_path.clone());
+            event!(
+                target: "iroh::_events::path::selected",
+                Level::DEBUG,
+                remote = %self.state.endpoint_id.fmt_short(),
+                %network_path,
+                prev_network_path = %prev,
+            );
+        }
+
+        if network_path.remote() != prev.remote() {
+            self.state
+                .paths
+                .insert_open_path(network_path.remote(), Source::Connection);
+            // As for abandoned paths, the old remote address only becomes inactive once no
+            // connection has a path to it anymore.
+            let still_used = self.connections.values().any(|conn_state| {
+                conn_state
+                    .paths
+                    .values()
+                    .any(|t| t.remote() == prev.remote())
+            });
+            if !still_used {
+                self.state.paths.abandoned_path(&prev.remote());
             }
         }
     }
@@ -990,6 +1164,19 @@ impl State {
         path: &noq::Path,
     ) -> Option<transports::FourTuple> {
         let network_path = self.transport_tuple_for_path(path)?;
+        self.register_and_configure_network_path(conn_id, conn_state, path, network_path.clone());
+        Some(network_path)
+    }
+
+    /// Like [`Self::register_and_configure_path`], with the network path to register the
+    /// path on.
+    fn register_and_configure_network_path(
+        &mut self,
+        conn_id: ConnId,
+        conn_state: &mut ConnectionState,
+        path: &noq::Path,
+        network_path: transports::FourTuple,
+    ) {
         event!(
             target: "iroh::_events::path::open",
             Level::DEBUG,
@@ -1008,7 +1195,6 @@ impl State {
         self.set_path_status(conn_id, path, &network_path);
         self.paths
             .insert_open_path(network_path.remote(), Source::Connection);
-        Some(network_path)
     }
 
     fn set_path_status(
@@ -1283,6 +1469,52 @@ impl ConnectionState {
     }
 }
 
+/// A difference between the paths tracked for a connection and the paths noq has open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathChange {
+    /// A tracked path is no longer open.
+    Abandoned(PathId),
+    /// A tracked path moved to another remote address, on this validated network path.
+    Migrated(PathId, transports::FourTuple),
+    /// An established path, on this validated network path, is not tracked.
+    Established(PathId, transports::FourTuple),
+}
+
+/// Lists how the `tracked` paths of a connection differ from its `open` paths.
+///
+/// `open` are the paths from [`noq::Connection::open_paths`], each with the network path it
+/// last validated, if any. Paths without one are left alone: they are either not established
+/// yet, which a later [`NoqPathEvent::Established`] reports, or they await the validation of a
+/// new network path, which a later [`NoqPathEvent::Migrated`] reports.
+///
+/// Only a changed remote address is a migration, as in noq: noq updates the local IP of a path
+/// in place.
+fn path_changes(
+    tracked: &FxHashMap<PathId, transports::FourTuple>,
+    open: &[(PathId, Option<transports::FourTuple>)],
+) -> Vec<PathChange> {
+    let mut abandoned: Vec<_> = tracked
+        .keys()
+        .filter(|path_id| !open.iter().any(|(id, _)| id == *path_id))
+        .copied()
+        .collect();
+    abandoned.sort();
+    let mut changes: Vec<_> = abandoned.into_iter().map(PathChange::Abandoned).collect();
+    for (path_id, network_path) in open {
+        let Some(network_path) = network_path else {
+            continue;
+        };
+        match tracked.get(path_id) {
+            None => changes.push(PathChange::Established(*path_id, network_path.clone())),
+            Some(recorded) if recorded.remote() != network_path.remote() => {
+                changes.push(PathChange::Migrated(*path_id, network_path.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+    changes
+}
+
 /// State of the endpoint relevant for path selection.
 ///
 /// Constructed by the endpoint and passed to [`PathSelector::select`].  Borrows from
@@ -1536,5 +1768,82 @@ async fn maybe_next<S: Stream + Unpin>(maybe_stream: Option<&mut S>) -> Option<O
     match maybe_stream {
         None => None,
         Some(s) => Some(s.next().await),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    fn ip_path(port: u16, local: Option<IpAddr>) -> transports::FourTuple {
+        transports::FourTuple::Ip {
+            remote: SocketAddr::new(Ipv4Addr::new(198, 51, 100, 1).into(), port),
+            local,
+        }
+    }
+
+    fn tracked(
+        paths: impl IntoIterator<Item = (u32, transports::FourTuple)>,
+    ) -> FxHashMap<PathId, transports::FourTuple> {
+        paths
+            .into_iter()
+            .map(|(id, network_path)| (PathId::from(id), network_path))
+            .collect()
+    }
+
+    #[test]
+    fn path_changes_none_when_in_sync() {
+        let tracked = tracked([(0, ip_path(1000, None)), (1, ip_path(2000, None))]);
+        let open = [
+            (PathId::ZERO, Some(ip_path(1000, None))),
+            (PathId::from(1u32), Some(ip_path(2000, None))),
+        ];
+        assert_eq!(path_changes(&tracked, &open), []);
+    }
+
+    #[test]
+    fn path_changes_finds_missed_events() {
+        let tracked = tracked([
+            (0, ip_path(1000, None)),
+            (1, ip_path(2000, None)),
+            (2, ip_path(3000, None)),
+        ]);
+        let open = [
+            (PathId::ZERO, Some(ip_path(1001, None))),
+            (PathId::from(2u32), Some(ip_path(3000, None))),
+            (PathId::from(3u32), Some(ip_path(4000, None))),
+        ];
+        assert_eq!(
+            path_changes(&tracked, &open),
+            [
+                PathChange::Abandoned(PathId::from(1u32)),
+                PathChange::Migrated(PathId::ZERO, ip_path(1001, None)),
+                PathChange::Established(PathId::from(3u32), ip_path(4000, None)),
+            ]
+        );
+    }
+
+    /// noq changes the local IP of a path without a migration, so neither does a resync.
+    #[test]
+    fn path_changes_ignores_local_ip() {
+        let tracked = tracked([(0, ip_path(1000, Some(Ipv4Addr::new(10, 0, 0, 1).into())))]);
+        let open = [(
+            PathId::ZERO,
+            Some(ip_path(1000, Some(Ipv4Addr::new(10, 0, 0, 2).into()))),
+        )];
+        assert_eq!(path_changes(&tracked, &open), []);
+        let open = [(PathId::ZERO, Some(ip_path(1000, None)))];
+        assert_eq!(path_changes(&tracked, &open), []);
+    }
+
+    /// Paths without a validated network path are not established yet, or await validation of
+    /// a migration: their events are still to come.
+    #[test]
+    fn path_changes_skips_unvalidated() {
+        let tracked = tracked([(0, ip_path(1000, None))]);
+        let open = [(PathId::ZERO, None), (PathId::from(1u32), None)];
+        assert_eq!(path_changes(&tracked, &open), []);
     }
 }

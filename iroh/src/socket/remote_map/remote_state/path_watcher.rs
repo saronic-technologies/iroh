@@ -9,6 +9,12 @@
 //! Closed paths are not retained in [`PathList`]; their final
 //! statistics arrive inline on [`PathEvent::Closed`].
 //!
+//! A path whose network path changes while it stays open, e.g. because a
+//! NAT rebinding made the remote's packets arrive from a new address, keeps
+//! its [`PathId`]: once the new network path is validated, the [`PathList`]
+//! entry is updated in place and [`PathEvent::Migrated`] is emitted,
+//! followed by [`PathEvent::Selected`] if it is the selected path.
+//!
 //! # Internal structure
 //!
 //! [`PathStateSender`] (owned by the [`RemoteStateActor`]) and
@@ -76,6 +82,10 @@ pub enum PathEvent {
         last_stats: Box<PathStats>,
     },
     /// This path was selected for transmission of application data.
+    ///
+    /// Also emitted again for the already-selected path when it migrates to a
+    /// new network path (see [`PathEvent::Migrated`]), carrying the new
+    /// addresses.
     #[non_exhaustive]
     Selected {
         /// Path identifier of the newly selected path.
@@ -84,6 +94,26 @@ pub enum PathEvent {
         remote_addr: TransportAddr,
         /// The local address of the newly selected path, if known.
         local_addr: LocalTransportAddr,
+    },
+    /// An open path moved to a new network path, keeping its [`PathId`].
+    ///
+    /// This happens when the remote's packets start arriving from a
+    /// different address, e.g. after a NAT rebinding, and the QUIC
+    /// connection migrates the path instead of opening a new one. Only
+    /// emitted once path validation confirmed the remote is reachable at
+    /// the new address.
+    #[non_exhaustive]
+    Migrated {
+        /// Path identifier.
+        id: PathId,
+        /// Remote transport address after the migration.
+        remote_addr: TransportAddr,
+        /// Local address after the migration, if known.
+        local_addr: LocalTransportAddr,
+        /// Remote transport address before the migration.
+        prev_remote_addr: TransportAddr,
+        /// Local address before the migration, if known.
+        prev_local_addr: LocalTransportAddr,
     },
     /// Events were dropped before the subscriber received them.
     ///
@@ -245,6 +275,46 @@ impl PathStateSender {
         if let Some(event) = event {
             let _ = self.events.send(event);
             self.shared.notify.notify_waiters();
+        }
+    }
+
+    /// Records that `noq` migrated an open path to `network_path` and emits
+    /// [`PathEvent::Migrated`], followed by [`PathEvent::Selected`] if it is the
+    /// selected path.
+    ///
+    /// Does nothing if the path is unknown or already at `network_path`.
+    pub(super) fn record_migrated(&self, id: PathId, network_path: &transports::FourTuple) {
+        let remote_addr: TransportAddr = network_path.remote().into();
+        let local_addr = network_path.local();
+        let (prev_remote_addr, prev_local_addr, is_selected) = {
+            let mut state = self.shared.state.lock().expect("poisoned");
+            let is_selected = state.selected == Some(id);
+            let Some(entry) = state.list.iter_mut().find(|e| e.handle.id() == id) else {
+                return;
+            };
+            if entry.remote_addr == remote_addr && entry.local_addr == local_addr {
+                return;
+            }
+            (
+                std::mem::replace(&mut entry.remote_addr, remote_addr.clone()),
+                std::mem::replace(&mut entry.local_addr, local_addr.clone()),
+                is_selected,
+            )
+        };
+        self.shared.notify.notify_waiters();
+        let _ = self.events.send(PathEvent::Migrated {
+            id,
+            remote_addr: remote_addr.clone(),
+            local_addr: local_addr.clone(),
+            prev_remote_addr,
+            prev_local_addr,
+        });
+        if is_selected {
+            let _ = self.events.send(PathEvent::Selected {
+                id,
+                remote_addr,
+                local_addr,
+            });
         }
     }
 
