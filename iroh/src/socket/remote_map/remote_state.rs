@@ -762,7 +762,8 @@ impl RemoteStateActor {
     /// Handles a path that noq migrated to a new, validated network path.
     ///
     /// The [`PathId`] stays the same while the remote's address changes, e.g. after its NAT
-    /// rebound. Everything that recorded the old four-tuple follows it, so the selected path
+    /// rebound, or while the remote's packets arrive on another of our addresses, which noq then
+    /// sends from. Everything that recorded the old four-tuple follows it, so the selected path
     /// and the path watcher keep pointing at the address that actually carries the path.
     fn handle_path_migrated(
         &mut self,
@@ -1474,7 +1475,7 @@ impl ConnectionState {
 enum PathChange {
     /// A tracked path is no longer open.
     Abandoned(PathId),
-    /// A tracked path moved to another remote address, on this validated network path.
+    /// A tracked path moved to another remote or local address, on this validated network path.
     Migrated(PathId, transports::FourTuple),
     /// An established path, on this validated network path, is not tracked.
     Established(PathId, transports::FourTuple),
@@ -1486,9 +1487,6 @@ enum PathChange {
 /// last validated, if any. Paths without one are left alone: they are either not established
 /// yet, which a later [`NoqPathEvent::Established`] reports, or they await the validation of a
 /// new network path, which a later [`NoqPathEvent::Migrated`] reports.
-///
-/// Only a changed remote address is a migration, as in noq: noq updates the local IP of a path
-/// in place.
 fn path_changes(
     tracked: &FxHashMap<PathId, transports::FourTuple>,
     open: &[(PathId, Option<transports::FourTuple>)],
@@ -1506,13 +1504,28 @@ fn path_changes(
         };
         match tracked.get(path_id) {
             None => changes.push(PathChange::Established(*path_id, network_path.clone())),
-            Some(recorded) if recorded.remote() != network_path.remote() => {
+            Some(recorded) if migrated(recorded, network_path) => {
                 changes.push(PathChange::Migrated(*path_id, network_path.clone()));
             }
             Some(_) => {}
         }
     }
     changes
+}
+
+/// Whether a path moved from the `recorded` network path to the `open` one.
+///
+/// As for [`NoqPathEvent::Migrated`], that is a new remote address, or a new local address in
+/// place of a known one. A local address becoming known or unknown is no change: noq reports
+/// neither.
+fn migrated(recorded: &transports::FourTuple, open: &transports::FourTuple) -> bool {
+    use transports::LocalTransportAddr::{Custom, Ip};
+    let local_moved = match (recorded.local(), open.local()) {
+        (Ip(Some(recorded)), Ip(Some(open))) => recorded != open,
+        (Custom(Some(recorded)), Custom(Some(open))) => recorded != open,
+        _ => false,
+    };
+    recorded.remote() != open.remote() || local_moved
 }
 
 /// State of the endpoint relevant for path selection.
@@ -1825,17 +1838,22 @@ mod tests {
         );
     }
 
-    /// noq changes the local IP of a path without a migration, so neither does a resync.
+    /// noq announces a path moving to another local IP as a migration, so a resync finds it
+    /// too. A local IP becoming known or unknown is no change, as noq announces neither.
     #[test]
-    fn path_changes_ignores_local_ip() {
-        let tracked = tracked([(0, ip_path(1000, Some(Ipv4Addr::new(10, 0, 0, 1).into())))]);
-        let open = [(
-            PathId::ZERO,
-            Some(ip_path(1000, Some(Ipv4Addr::new(10, 0, 0, 2).into()))),
-        )];
-        assert_eq!(path_changes(&tracked, &open), []);
-        let open = [(PathId::ZERO, Some(ip_path(1000, None)))];
-        assert_eq!(path_changes(&tracked, &open), []);
+    fn path_changes_finds_local_ip_migration() {
+        let local_ip = |last_octet| Some(IpAddr::from(Ipv4Addr::new(10, 0, 0, last_octet)));
+        let known = tracked([(0, ip_path(1000, local_ip(1)))]);
+        let moved = ip_path(1000, local_ip(2));
+        assert_eq!(
+            path_changes(&known, &[(PathId::ZERO, Some(moved.clone()))]),
+            [PathChange::Migrated(PathId::ZERO, moved.clone())]
+        );
+        let cleared = [(PathId::ZERO, Some(ip_path(1000, None)))];
+        assert_eq!(path_changes(&known, &cleared), []);
+
+        let unknown = tracked([(0, ip_path(1000, None))]);
+        assert_eq!(path_changes(&unknown, &[(PathId::ZERO, Some(moved))]), []);
     }
 
     /// Paths without a validated network path are not established yet, or await validation of

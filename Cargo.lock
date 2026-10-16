@@ -2291,10 +2291,10 @@ dependencies = [
  "n0-future",
  "n0-tracing-test",
  "n0-watcher",
- "netwatch 0.19.1 (git+https://github.com/saronic-technologies/net-tools/?rev=2b560b994a1f9658d2a71dab343dbb64bf801039)",
+ "netwatch 0.19.1 (git+https://github.com/saronic-technologies/net-tools/?rev=193c03c437eb140b2f9934dcd9e0747a67a32721)",
  "noq",
  "noq-proto",
- "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f)",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce)",
  "papaya",
  "parse-size",
  "patchbay",
@@ -3100,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.1"
-source = "git+https://github.com/saronic-technologies/net-tools/?rev=2b560b994a1f9658d2a71dab343dbb64bf801039#2b560b994a1f9658d2a71dab343dbb64bf801039"
+source = "git+https://github.com/saronic-technologies/net-tools/?rev=193c03c437eb140b2f9934dcd9e0747a67a32721#193c03c437eb140b2f9934dcd9e0747a67a32721"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3117,7 +3117,7 @@ dependencies = [
  "netlink-packet-route 0.31.0",
  "netlink-proto",
  "netlink-sys",
- "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f)",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce)",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "pin-project-lite",
@@ -3182,13 +3182,13 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 [[package]]
 name = "noq"
 version = "1.0.1"
-source = "git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f#cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f"
+source = "git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce#35bc9e78c46aa83815b77f190070da97c6eff9ce"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "derive_more",
  "noq-proto",
- "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f)",
+ "noq-udp 1.0.1 (git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce)",
  "pin-project-lite",
  "rustc-hash",
  "rustls",
@@ -3203,7 +3203,7 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "1.0.1"
-source = "git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f#cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f"
+source = "git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce#35bc9e78c46aa83815b77f190070da97c6eff9ce"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -3246,7 +3246,7 @@ dependencies = [
 [[package]]
 name = "noq-udp"
 version = "1.0.1"
-source = "git+https://github.com/saronic-technologies/noq?rev=cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f#cb4b0abc1fd2fc18c8a43928bfaa8a3733a8523f"
+source = "git+https://github.com/saronic-technologies/noq?rev=35bc9e78c46aa83815b77f190070da97c6eff9ce#35bc9e78c46aa83815b77f190070da97c6eff9ce"
 dependencies = [
  "cfg_aliases",
  "libc",

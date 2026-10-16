@@ -31,6 +31,12 @@
           cargo-nextest
           cargo-deny
           cargo-make
+        ] ++ lib.optionals stdenv.hostPlatform.isLinux [
+          # Tools the patchbay netsim tests (`cargo make patchbay`) shell out to.
+          nftables
+          iproute2
+          conntrack-tools
+          iputils
         ];
       in
       {
