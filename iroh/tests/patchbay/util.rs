@@ -108,6 +108,7 @@ pub(crate) struct Pair {
     client_dev: Option<Device>,
     server_fn: Option<RunFn>,
     client_fn: Option<RunFn>,
+    configure: fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
 }
 
 impl Pair {
@@ -119,7 +120,17 @@ impl Pair {
             client_dev: None,
             server_fn: None,
             client_fn: None,
+            configure: |builder| builder,
         }
+    }
+
+    /// Applies `configure` to the endpoint builder of both sides.
+    pub(crate) fn configure(
+        mut self,
+        configure: fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
+    ) -> Self {
+        self.configure = configure;
+        self
     }
 
     /// Places a device and closure on the given [`Side`].
@@ -205,6 +216,7 @@ impl Pair {
 
         let (addr_tx, addr_rx) = oneshot::channel();
         let relay_map2 = self.relay_map.clone();
+        let configure = self.configure;
 
         // Create an in-memory synchronization barrier to wait for both run functions to complete
         // before dropping endpoints. We use this to guarantee completion without awaiting
@@ -214,9 +226,9 @@ impl Pair {
         let barrier_server = Arc::new(Barrier::new(2));
         let barrier_client = barrier_server.clone();
 
-        let server_task = server_device.spawn(|dev| {
+        let server_task = server_device.spawn(move |dev| {
             async move {
-                let endpoint = endpoint_builder(&dev, relay_map2)
+                let endpoint = configure(endpoint_builder(&dev, relay_map2))
                     .bind()
                     .await
                     .context("server endpoint bind")?;
@@ -257,7 +269,7 @@ impl Pair {
         })?;
         let client_task = client_device.spawn(move |dev| {
             async move {
-                let endpoint = endpoint_builder(&dev, self.relay_map)
+                let endpoint = configure(endpoint_builder(&dev, self.relay_map))
                     .bind()
                     .await
                     .context("client endpoint bind")?;
