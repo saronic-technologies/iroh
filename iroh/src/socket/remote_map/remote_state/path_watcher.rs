@@ -37,7 +37,7 @@ use std::{
 
 use iroh_base::TransportAddr;
 use n0_future::{StreamExt, time::Duration};
-use noq::WeakPathHandle;
+use noq::{AddressDiscovery, WeakPathHandle};
 use noq_proto::PathId;
 use smallvec::SmallVec;
 use tokio::sync::{Notify, broadcast, futures::Notified};
@@ -563,6 +563,18 @@ impl<'conn> Path<'conn> {
     /// Returns the path's round-trip time estimate.
     pub fn rtt(&self) -> Duration {
         self.stats().rtt
+    }
+
+    /// Returns a stream of our external address as observed and reported by the remote
+    /// over this path.
+    ///
+    /// Yields the latest report first, if any, then every change. Ends when the path is
+    /// discarded. Returns `None` if the path is already closed. Requires the
+    /// address-discovery extension, see [`Connection::observed_address`].
+    ///
+    /// [`Connection::observed_address`]: crate::endpoint::Connection::observed_address
+    pub fn observed_address(&self) -> Option<AddressDiscovery> {
+        self.data.upgrade(self.conn).observed_external_addr().ok()
     }
 }
 

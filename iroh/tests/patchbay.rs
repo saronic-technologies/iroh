@@ -29,10 +29,14 @@
 use std::{net::Ipv4Addr, time::Duration};
 
 use ipnet::Ipv4Net;
-use iroh::endpoint::Side;
-use n0_error::{Result, StackResultExt};
+use iroh::{
+    TransportAddr,
+    endpoint::{QuicTransportConfig, Side},
+};
+use n0_error::{Result, StackResultExt, StdResultExt};
+use n0_future::StreamExt;
 use n0_tracing_test::traced_test;
-use patchbay::{IfaceConfig, LinkCondition, LinkDirection, Nat};
+use patchbay::{IfaceConfig, IpSupport, LinkCondition, LinkDirection, Nat, RouterPreset};
 use testdir::testdir;
 use tracing::info;
 
@@ -83,6 +87,86 @@ async fn holepunch_simple() -> Result {
             assert!(is_relayed(&conn), "connection started relayed");
             conn.wait_ip(timeout).await.context("holepunch to direct")?;
             info!("connection became direct");
+            Ok(())
+        })
+        .run()
+        .await?;
+    guard.ok();
+    Ok(())
+}
+
+/// With `keep_path_per_family`, a holepunched dual-stack pair keeps a direct path in
+/// each IP family, and each path reports an observed address of its own family.
+#[tokio::test]
+#[traced_test]
+async fn keep_path_per_family() -> Result {
+    let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
+    let nat1 = lab
+        .add_router("nat1")
+        .preset(RouterPreset::Home)
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let nat2 = lab
+        .add_router("nat2")
+        .preset(RouterPreset::Home)
+        .ip_support(IpSupport::DualStack)
+        .build()
+        .await?;
+    let server = lab.add_device("server").uplink(nat1.id()).build().await?;
+    let client = lab.add_device("client").uplink(nat2.id()).build().await?;
+    let timeout = Duration::from_secs(15);
+    Pair::new(relay_map)
+        .configure(|builder| {
+            builder.keep_path_per_family(true).transport_config(
+                QuicTransportConfig::builder()
+                    .send_observed_address_reports(true)
+                    .receive_observed_address_reports(true)
+                    .build(),
+            )
+        })
+        .server(server, async |_dev, _ep, conn| {
+            conn.closed().await;
+            Ok(())
+        })
+        .client(client, async move |_dev, _ep, conn| {
+            conn.wait_ip(timeout).await.context("holepunch to direct")?;
+            let mut paths = conn.paths_stream();
+            let observed = tokio::time::timeout(timeout, async {
+                loop {
+                    let list = paths.next().await.expect("paths stream ended");
+                    let ip_paths: Vec<_> = list.iter().filter(|p| p.is_ip()).collect();
+                    let has = |v4: bool| {
+                        ip_paths.iter().any(|p| {
+                            matches!(p.remote_addr(), TransportAddr::Ip(a) if a.is_ipv4() == v4)
+                        })
+                    };
+                    if has(true) && has(false) {
+                        break ip_paths
+                            .iter()
+                            .map(|p| (p.remote_addr().clone(), p.observed_address()))
+                            .collect::<Vec<_>>();
+                    }
+                }
+            })
+            .await
+            .std_context("no direct path in both families")?;
+            for (remote, stream) in observed {
+                let mut stream = stream.context("path closed")?;
+                let addr = tokio::time::timeout(timeout, stream.next())
+                    .await
+                    .std_context("no observed address")?
+                    .context("observed address stream ended")?;
+                info!(?remote, %addr, "observed address");
+                let TransportAddr::Ip(remote) = remote else {
+                    unreachable!("filtered to IP paths");
+                };
+                n0_error::ensure_any!(
+                    addr.ip().to_canonical().is_ipv4() == remote.is_ipv4(),
+                    "observed address family matches the path"
+                );
+            }
+            conn.close(0u32.into(), b"bye");
             Ok(())
         })
         .run()

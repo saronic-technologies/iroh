@@ -104,17 +104,18 @@ pub use self::{
         RemoteEndpointIdError, RetryError, WeakConnectionHandle, ZeroRttStatus,
     },
     quic::{
-        AcceptBi, AcceptUni, AckFrequencyConfig, ApplicationClose, Chunk, Closed, ClosedStream,
-        ConnectionClose, ConnectionError, ConnectionStats, Controller, ControllerFactory,
-        ControllerMetrics, CryptoError, DecryptedInitial, Dir, ExportKeyingMaterialError,
-        FrameStats, FrameType, HandshakeTokenKey, HeaderKey, IdleTimeout, IncomingAlpns, Keys,
-        MtuDiscoveryConfig, ObservedExternalAddr, OpenBi, OpenUni, PacketKey, PathId, PathStats,
-        QuicConnectError, QuicTransportConfig, QuicTransportConfigBuilder, ReadDatagram, ReadError,
-        ReadExactError, ReadToEndError, RecvStream, ResetError, RttEstimator, SendDatagram,
-        SendDatagramError, SendStream, ServerConfig, ServerConfigBuilder, Side, StoppedError,
-        StreamId, TimeSource, TokenLog, TokenReuseError, TransportError, TransportErrorCode,
-        TransportParameters, UdpStats, UnorderedRecvStream, UnsupportedVersion,
-        ValidationTokenConfig, VarInt, VarIntBoundsExceeded, WriteError,
+        AcceptBi, AcceptUni, AckFrequencyConfig, AddressDiscovery, ApplicationClose, Chunk, Closed,
+        ClosedStream, ConnectionClose, ConnectionError, ConnectionStats, Controller,
+        ControllerFactory, ControllerMetrics, CryptoError, DecryptedInitial, Dir,
+        ExportKeyingMaterialError, FrameStats, FrameType, HandshakeTokenKey, HeaderKey,
+        IdleTimeout, IncomingAlpns, Keys, MtuDiscoveryConfig, ObservedExternalAddr, OpenBi,
+        OpenUni, PacketKey, PathId, PathStats, QuicConnectError, QuicTransportConfig,
+        QuicTransportConfigBuilder, ReadDatagram, ReadError, ReadExactError, ReadToEndError,
+        RecvStream, ResetError, RttEstimator, SendDatagram, SendDatagramError, SendStream,
+        ServerConfig, ServerConfigBuilder, Side, StoppedError, StreamId, TimeSource, TokenLog,
+        TokenReuseError, TransportError, TransportErrorCode, TransportParameters, UdpStats,
+        UnorderedRecvStream, UnsupportedVersion, ValidationTokenConfig, VarInt,
+        VarIntBoundsExceeded, WriteError,
     },
 };
 #[cfg(not(wasm_browser))]
@@ -149,6 +150,7 @@ pub struct Builder {
     max_tls_tickets: usize,
     hooks: EndpointHooksList,
     path_selector: Arc<dyn PathSelector>,
+    keep_path_per_family: bool,
     portmapper_config: PortmapperConfig,
     net_report_config: NetReportConfig,
     crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
@@ -221,6 +223,7 @@ impl Builder {
             transports,
             hooks: Default::default(),
             path_selector: Arc::new(BiasedRttPathSelector::default()),
+            keep_path_per_family: false,
             portmapper_config: Default::default(),
             net_report_config: Default::default(),
             crypto_provider: None,
@@ -291,6 +294,7 @@ impl Builder {
             metrics,
             hooks: self.hooks,
             path_selector: self.path_selector,
+            keep_path_per_family: self.keep_path_per_family,
             portmapper_config: self.portmapper_config,
             net_report_config: self.net_report_config,
             static_config,
@@ -910,6 +914,18 @@ impl Builder {
     #[cfg(feature = "unstable-custom-transports")]
     pub fn path_selector(mut self, selector: Arc<dyn PathSelector>) -> Self {
         self.path_selector = selector;
+        self
+    }
+
+    /// Keeps one direct path of each IP family open per connection.
+    ///
+    /// By default only the selected direct path stays open and other direct paths are
+    /// closed. With this enabled, a connection also keeps its best direct path of the
+    /// other IP family open as a backup path. That path carries no application data
+    /// unless selected, but receives its own observed-address reports and allows a fast
+    /// failover between families.
+    pub fn keep_path_per_family(mut self, keep: bool) -> Self {
+        self.keep_path_per_family = keep;
         self
     }
 }

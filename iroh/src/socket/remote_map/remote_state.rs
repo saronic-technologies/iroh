@@ -170,6 +170,8 @@ struct State {
 
     /// The path selector used to pick the preferred path among the candidates.
     path_selector: Arc<dyn PathSelector>,
+    /// See [`crate::endpoint::Builder::keep_path_per_family`].
+    keep_path_per_family: bool,
 }
 
 impl RemoteStateActor {
@@ -182,6 +184,7 @@ impl RemoteStateActor {
         metrics: Arc<SocketMetrics>,
         address_lookup: AddressLookupServices,
         path_selector: Arc<dyn PathSelector>,
+        keep_path_per_family: bool,
     ) -> Self {
         Self {
             connections: FxHashMap::default(),
@@ -203,6 +206,7 @@ impl RemoteStateActor {
                 pending_open_paths: VecDeque::new(),
                 address_lookup_stream: None,
                 path_selector,
+                keep_path_per_family,
             },
         }
     }
@@ -860,7 +864,8 @@ impl RemoteStateActor {
     /// Propagates a change of [`State::selected_path`] to noq.
     ///
     /// Iterates over all connections and applies the selected path as follows:
-    /// - Closes non-selected IP paths (but keeps one IP path open still)
+    /// - Closes non-selected IP paths (but keeps one IP path open still), except the
+    ///   per-family backups when [`State::keep_path_per_family`] is set
     /// - Sets all non-selected paths to [`PathStatus::Backup`]
     /// - Opens the selected path if it does not exist on the connection
     /// - Sets the selected path to [`PathStatus::Available`]
@@ -880,6 +885,11 @@ impl RemoteStateActor {
             self.state
                 .open_path_on_conn(*conn_id, conn_state, &conn, &selected);
 
+            let backups = if self.state.keep_path_per_family {
+                backup_paths_per_family(conn_state, &conn, &selected)
+            } else {
+                Vec::new()
+            };
             for (path_id, path_remote) in conn_state.paths.iter() {
                 let Some(path) = conn.path(*path_id) else {
                     continue;
@@ -893,6 +903,7 @@ impl RemoteStateActor {
                 if conn.side().is_client()
                     && path_remote.is_ip()
                     && path_remote != &selected
+                    && !backups.contains(path_id)
                     && conn_state.paths.values().filter(|a| a.is_ip()).count() > 1
                 {
                     trace!(?path_remote, %conn_id, %path_id, "closing direct path");
@@ -934,6 +945,7 @@ impl RemoteStateActor {
     ///
     /// Currently we need to have 1 IP path, with a good enough latency.
     fn check_connections(&mut self) {
+        let local_candidates = self.state.local_candidates();
         let mut is_goodenough = true;
         for conn_state in self.connections.values() {
             let mut is_conn_goodenough = false;
@@ -955,6 +967,11 @@ impl RemoteStateActor {
                     is_conn_goodenough = is_latency_goodenough;
                 } else {
                     // No IP transport found
+                    is_conn_goodenough = false;
+                }
+                if self.state.keep_path_per_family
+                    && !missing_families(conn_state, &conn, &local_candidates).is_empty()
+                {
                     is_conn_goodenough = false;
                 }
             }
@@ -1295,6 +1312,58 @@ impl State {
             .map(|d| d.addr)
             .collect()
     }
+}
+
+/// The direct paths kept open next to `selected`: the lowest-RTT direct path of each IP
+/// family other than the selected path's.
+fn backup_paths_per_family(
+    conn_state: &ConnectionState,
+    conn: &noq::Connection,
+    selected: &transports::FourTuple,
+) -> Vec<PathId> {
+    [transports::AddrKind::IpV4, transports::AddrKind::IpV6]
+        .into_iter()
+        .filter(|kind| *kind != selected.addr_kind())
+        .filter_map(|kind| {
+            conn_state
+                .paths
+                .iter()
+                .filter(|(_, addr)| addr.addr_kind() == kind)
+                .min_by_key(|(path_id, _)| {
+                    conn.path_stats(**path_id)
+                        .map(|stats| stats.rtt)
+                        .unwrap_or(Duration::MAX)
+                })
+                .map(|(path_id, _)| *path_id)
+        })
+        .collect()
+}
+
+/// IP families both sides have NAT traversal candidates in but `conn_state` has no
+/// direct path in.
+fn missing_families(
+    conn_state: &ConnectionState,
+    conn: &noq::Connection,
+    local_candidates: &BTreeSet<SocketAddr>,
+) -> Vec<transports::AddrKind> {
+    let remote_candidates = conn
+        .get_remote_nat_traversal_addresses()
+        .unwrap_or_default();
+    let kind = |addr: &SocketAddr| match addr.ip().to_canonical() {
+        std::net::IpAddr::V4(_) => transports::AddrKind::IpV4,
+        std::net::IpAddr::V6(_) => transports::AddrKind::IpV6,
+    };
+    [transports::AddrKind::IpV4, transports::AddrKind::IpV6]
+        .into_iter()
+        .filter(|family| {
+            local_candidates.iter().any(|a| kind(a) == *family)
+                && remote_candidates.iter().any(|a| kind(a) == *family)
+                && !conn_state
+                    .paths
+                    .values()
+                    .any(|addr| addr.addr_kind() == *family)
+        })
+        .collect()
 }
 
 /// Updates QNT's candidate addresses to be the current set of direct addresses.

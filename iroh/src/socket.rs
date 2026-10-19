@@ -192,6 +192,7 @@ pub(crate) struct Options {
     pub(crate) metrics: EndpointMetrics,
     pub(crate) hooks: EndpointHooksList,
     pub(crate) path_selector: Arc<dyn PathSelector>,
+    pub(crate) keep_path_per_family: bool,
     pub(crate) portmapper_config: portmapper::PortmapperConfig,
     pub(crate) net_report_config: crate::net_report::NetReportConfig,
 
@@ -941,6 +942,7 @@ impl EndpointInner {
             metrics,
             hooks,
             path_selector,
+            keep_path_per_family,
             portmapper_config,
             net_report_config,
             static_config,
@@ -1045,6 +1047,7 @@ impl EndpointInner {
                 address_lookup.clone(),
                 shutdown_token.child_token(),
                 path_selector,
+                keep_path_per_family,
                 span.clone(),
             )
         };
@@ -2252,6 +2255,7 @@ mod tests {
             metrics: Default::default(),
             hooks: Default::default(),
             path_selector: Arc::new(BiasedRttPathSelector::default()),
+            keep_path_per_family: false,
             portmapper_config: Default::default(),
             net_report_config: Default::default(),
             static_config,
@@ -2671,6 +2675,7 @@ mod tests {
             metrics: Default::default(),
             hooks: Default::default(),
             path_selector: Arc::new(BiasedRttPathSelector::default()),
+            keep_path_per_family: false,
             portmapper_config: Default::default(),
             net_report_config: Default::default(),
             static_config,
