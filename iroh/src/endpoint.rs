@@ -1736,6 +1736,27 @@ impl Endpoint {
         self.inner.network_change().await;
     }
 
+    /// Like [`Endpoint::network_change`], but skips netmon's interface diff and
+    /// handles the change as if it had been detected, with the given severity.
+    /// With `is_major` the UDP sockets are rebound, the DNS cache cleared and the
+    /// relay connections re-checked; in both cases the direct addresses are
+    /// re-probed and the QUIC stack is told to re-validate its paths.
+    ///
+    /// Path re-validation still reads netmon's last interface snapshot;
+    /// [`Endpoint::network_change`] is what refreshes it.
+    ///
+    /// Needed on Android, where netmon has no route monitor and the app must push
+    /// network changes in.
+    ///
+    /// If the endpoint is closed, this method logs and ignores the request.
+    pub async fn force_network_change(&self, is_major: bool) {
+        if self.is_closed() {
+            debug!("Attempting to force a network change on a closed endpoint. Ignoring.");
+            return;
+        }
+        self.inner.force_network_change(is_major).await;
+    }
+
     // # Methods to update internal state.
 
     /// Sets the initial user-defined data to be published in Address Lookups for this endpoint.

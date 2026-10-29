@@ -1364,8 +1364,8 @@ impl EndpointInner {
             .ok();
     }
 
-    #[cfg(all(test, with_crypto_provider))]
-    async fn force_network_change(&self, is_major: bool) {
+    /// Like [`Self::network_change`], but bypasses netmon's interface diff.
+    pub(crate) async fn force_network_change(&self, is_major: bool) {
         self.actor_sender
             .send(ActorMessage::ForceNetworkChange(is_major))
             .await
@@ -1463,7 +1463,6 @@ enum ActorMessage {
     ),
     /// Re-evaluate direct addresses, e.g. after configured external addresses changed.
     DirectAddrRefresh,
-    #[cfg(all(test, with_crypto_provider))]
     ForceNetworkChange(bool),
 }
 
@@ -1865,7 +1864,6 @@ impl Actor {
                     self.update_direct_addresses(report.as_ref());
                 }
             }
-            #[cfg(all(test, with_crypto_provider))]
             ActorMessage::ForceNetworkChange(is_major) => {
                 self.handle_network_change(is_major);
             }
