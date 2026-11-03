@@ -254,6 +254,9 @@ impl RemoteStateActor {
         let check_connections = time::interval(UPGRADE_INTERVAL);
         n0_future::pin!(check_connections);
 
+        let reprobe = time::interval(HOLEPUNCH_ATTEMPTS_INTERVAL);
+        n0_future::pin!(reprobe);
+
         loop {
             let scheduled_path_open = match self.state.scheduled_open_path {
                 Some(when) => MaybeFuture::Some(time::sleep_until(when)),
@@ -321,6 +324,9 @@ impl RemoteStateActor {
                 }
                 _ = check_connections.tick() => {
                     self.check_connections();
+                }
+                _ = reprobe.tick() => {
+                    self.reprobe_without_ip_path();
                 }
                 _ = &mut idle_timeout => {
                     if self.is_idle(&inbox) {
@@ -966,6 +972,29 @@ impl RemoteStateActor {
             self.trigger_holepunching();
         }
     }
+
+    /// Re-attempts holepunching while a connection has no direct path.
+    ///
+    /// Holepunching otherwise reruns when a candidate set changes or on the
+    /// [`UPGRADE_INTERVAL`] check. A link cut changes neither: once the direct path has
+    /// timed out the connection sits on the relay until the next check, up to a minute
+    /// after the link is back. [`Self::trigger_holepunching`] rate-limits repeats to
+    /// [`HOLEPUNCH_ATTEMPTS_INTERVAL`].
+    fn reprobe_without_ip_path(&mut self) {
+        if self
+            .connections
+            .values()
+            .any(|conn_state| !has_ip_path(&conn_state.paths))
+        {
+            trace!("a connection has no direct path, triggering holepunching");
+            self.trigger_holepunching();
+        }
+    }
+}
+
+/// Whether any of a connection's open paths is a direct IP path.
+fn has_ip_path(paths: &FxHashMap<PathId, transports::FourTuple>) -> bool {
+    paths.values().any(|addr| addr.is_ip())
 }
 
 impl State {
@@ -1804,6 +1833,20 @@ mod tests {
             .into_iter()
             .map(|(id, network_path)| (PathId::from(id), network_path))
             .collect()
+    }
+
+    #[test]
+    fn has_ip_path_ignores_relay_paths() {
+        let relay = transports::FourTuple::from_remote(transports::Addr::Relay(
+            "https://relay.invalid".parse().unwrap(),
+            EndpointId::from_bytes(&[1u8; 32]).unwrap(),
+        ));
+        assert!(!has_ip_path(&tracked([(1, relay.clone())])));
+        assert!(has_ip_path(&tracked([
+            (1, relay),
+            (2, ip_path(1000, None))
+        ])));
+        assert!(!has_ip_path(&tracked([])));
     }
 
     #[test]
