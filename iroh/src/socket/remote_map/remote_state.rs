@@ -885,17 +885,25 @@ impl RemoteStateActor {
                     continue;
                 };
 
-                // Closes redundant IP paths so that at most one remains per connection.
+                // Closes redundant IP paths so that at most one remains per connection, and
+                // closes the relay path once an IP path is selected.
                 //
-                // Relay and custom paths are kept open. Only the client closes paths,
-                // to avoid the client and server independently closing different paths
-                // and racing to abandon the last one.
+                // A relay path demoted to backup is not inert: packets sent on it while it
+                // was the only live path stay in flight until that path's own loss timers
+                // fire, and an ordered stream delivers nothing sent later on the new IP
+                // path until they do. Closing (abandoning) the path makes noq declare that
+                // data lost and resend it on the selected path right away; the relay path
+                // is reopened on demand when it is selected again. Custom paths are kept
+                // open. Only the client closes paths, to avoid the client and server
+                // independently closing different paths and racing to abandon the last one.
+                let redundant_ip = path_remote.is_ip()
+                    && conn_state.paths.values().filter(|a| a.is_ip()).count() > 1;
+                let demoted_relay = path_remote.is_relay() && selected.is_ip();
                 if conn.side().is_client()
-                    && path_remote.is_ip()
                     && path_remote != &selected
-                    && conn_state.paths.values().filter(|a| a.is_ip()).count() > 1
+                    && (redundant_ip || demoted_relay)
                 {
-                    trace!(?path_remote, %conn_id, %path_id, "closing direct path");
+                    trace!(?path_remote, %conn_id, %path_id, "closing unselected path");
                     match path.close() {
                         Err(noq_proto::ClosePathError::MultipathNotNegotiated) => {
                             error!("multipath not negotiated");
