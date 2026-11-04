@@ -362,6 +362,14 @@ impl ActiveRelayActor {
     /// [`RelayActor`] blocks on it and stops forwarding datagrams for every other relay,
     /// which stalls each new connection on the socket until this actor exits.
     ///
+    /// A network change ends the wait early: [`ActiveRelayMessage::CheckConnection`] is
+    /// sent to every active relay on a rebind or a major network change, and a relay that
+    /// became unreachable because the local link went down is worth dialing again the
+    /// moment the link is back, not once the remaining delay has passed. The backoff
+    /// itself is kept, so a relay that is dead for its own reasons is tried once more per
+    /// network change and then waits as long as before. Becoming the home relay ends the
+    /// wait for the same reason.
+    ///
     /// Returns `false` if the actor should shut down instead of retrying.
     async fn sleep_backoff(&mut self, delay: Duration) -> bool {
         let sleep = time::sleep(delay);
@@ -382,6 +390,33 @@ impl ActiveRelayActor {
                     match msg {
                         ActiveRelayPrioMessage::HasEndpointRoute(_peer, sender) => {
                             sender.send(false).ok();
+                        }
+                    }
+                }
+                msg = self.inbox.recv() => {
+                    let Some(msg) = msg else {
+                        debug!("Inbox closed, shutdown.");
+                        return false;
+                    };
+                    match msg {
+                        ActiveRelayMessage::CheckConnection { .. } => {
+                            debug!("Network changed, retrying before the backoff elapsed.");
+                            return true;
+                        }
+                        ActiveRelayMessage::SetHomeRelay(is_home) => {
+                            self.set_home_relay(is_home);
+                            if is_home {
+                                debug!("Became home relay, retrying before the backoff elapsed.");
+                                return true;
+                            }
+                        }
+                        #[cfg(test)]
+                        ActiveRelayMessage::GetLocalAddr(sender) => {
+                            sender.send(None).ok();
+                        }
+                        #[cfg(test)]
+                        ActiveRelayMessage::PingServer(sender) => {
+                            drop(sender);
                         }
                     }
                 }
@@ -1914,6 +1949,61 @@ mod tests {
 
         let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
         assert!(keep_running, "backoff should complete normally");
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_network_change_ends_backoff_early() {
+        tokio::time::pause();
+        let secret_key = SecretKey::from_bytes(&[1u8; 32]);
+        let url: RelayUrl = "https://relay.invalid".parse().unwrap();
+        let (_prio_inbox_tx, prio_inbox_rx) = mpsc::channel(8);
+        let (inbox_tx, inbox_rx) = mpsc::channel(16);
+        let (_send_datagram_tx, send_datagram_rx) = mpsc::channel(2);
+        let (recv_datagram_tx, _recv_datagram_rx) = mpsc::channel(16);
+        let opts = ActiveRelayActorOptions {
+            url,
+            prio_inbox_: prio_inbox_rx,
+            inbox: inbox_rx,
+            relay_datagrams_send: send_datagram_rx,
+            relay_datagrams_recv: recv_datagram_tx,
+            connection_opts: RelayConnectionOptions {
+                secret_key,
+                dns_resolver: DnsResolver::new(),
+                proxy_url: None,
+                prefer_ipv6: Arc::new(AtomicBool::new(true)),
+                tls_config: CaTlsConfig::insecure_skip_verify()
+                    .client_config(default_provider())
+                    .expect("infallible"),
+                auth_token: None,
+            },
+            stop_token: CancellationToken::new(),
+            metrics: Default::default(),
+            my_relay: Default::default(),
+        };
+        let mut actor = ActiveRelayActor::new(opts);
+
+        let backoff = tokio::spawn(async move {
+            let keep_running = actor.sleep_backoff(Duration::from_secs(60)).await;
+            (actor, keep_running)
+        });
+
+        // The link came back: the socket checks every relay connection. With paused time
+        // the 60 s delay can only end because of the message.
+        inbox_tx
+            .send(ActiveRelayMessage::CheckConnection {
+                local_ips: Vec::new(),
+            })
+            .await
+            .expect("actor alive");
+        let (_actor, keep_running) = tokio::time::timeout(Duration::from_secs(1), backoff)
+            .await
+            .expect("backoff did not end on the network change")
+            .expect("backoff task panicked");
+        assert!(
+            keep_running,
+            "a network change retries, it does not shut down"
+        );
     }
 
     #[test]
