@@ -53,10 +53,10 @@ pub(super) enum RttMessage {
     },
 }
 
-/// Actor to coordinate congestion controller state with magic socket state.
+/// Actor that watches magic socket path changes per connection.
 ///
-/// The magic socket can change the underlying network path, between two nodes.  If we can
-/// inform the QUIC congestion controller of this event it will work much more efficiently.
+/// Upstream uses it to reset the QUIC congestion controller on every path change; this
+/// fork only keeps the connection metrics (see [`MappedStream::poll_next`]).
 #[derive(derive_more::Debug)]
 struct RttActor {
     /// Stream of connection type changes.
@@ -83,12 +83,17 @@ struct ConnectionEvent {
 impl Stream for MappedStream {
     type Item = ConnectionEvent;
 
-    /// Performs the congestion controller reset for a magic socket path change.
+    /// Observes a magic socket path change for the connection metrics.
     ///
-    /// Regardless of which kind of path we are changed to, the congestion controller needs
-    /// resetting.  Even when switching to mixed we should reset the state as e.g. switching
-    /// from direct to mixed back to direct should be a rare exception and is a bug if this
-    /// happens commonly.
+    /// Upstream also resets the connection's congestion controller and RTT estimate here
+    /// (`WeakConnectionHandle::network_path_changed`). That reset is deliberately NOT done:
+    /// quinn's `pto_count` backoff exponent survives it (only an ACK clears it), so a
+    /// `ConnectionType` flip during an outage leaves the next probe timeout at the initial
+    /// RTT estimate times an already large backoff. On our links a flip is routinely a
+    /// symptom of loss, not of a new path (trust expiry to `Mixed` when a relay URL is
+    /// known, or a `Direct(a)` to `Direct(b)` candidate flip after a pong timeout), and the
+    /// reset parks the sender for tens of seconds after the link is back. Keeping the
+    /// measured RTT and congestion state lets the normal PTO schedule recover instead.
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -96,11 +101,11 @@ impl Stream for MappedStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(new_conn_type)) => {
                 let mut became_direct = false;
-                if self.connection.network_path_changed() {
+                if self.connection.is_alive() {
                     debug!(
                         node_id = %self.node_id.fmt_short(),
                         new_type = ?new_conn_type,
-                        "Congestion controller state reset",
+                        "Network path changed, congestion controller state kept",
                     );
                     if !self.was_direct_before && matches!(new_conn_type, ConnectionType::Direct(_))
                     {
