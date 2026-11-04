@@ -326,7 +326,7 @@ impl RemoteStateActor {
                     self.check_connections();
                 }
                 _ = reprobe.tick() => {
-                    self.reprobe_without_ip_path();
+                    self.reprobe_paths();
                 }
                 _ = &mut idle_timeout => {
                     if self.is_idle(&inbox) {
@@ -973,14 +973,20 @@ impl RemoteStateActor {
         }
     }
 
-    /// Re-attempts holepunching while a connection has no direct path.
+    /// Re-attempts holepunching while a connection has no direct path, and reopens the
+    /// relay path on a connection that lost it.
     ///
     /// Holepunching otherwise reruns when a candidate set changes or on the
     /// [`UPGRADE_INTERVAL`] check. A link cut changes neither: once the direct path has
     /// timed out the connection sits on the relay until the next check, up to a minute
     /// after the link is back. [`Self::trigger_holepunching`] rate-limits repeats to
     /// [`HOLEPUNCH_ATTEMPTS_INTERVAL`].
-    fn reprobe_without_ip_path(&mut self) {
+    ///
+    /// Relay paths are otherwise opened only when a connection is added. A relay path that
+    /// times out, for example while the local link to the relay is down, would never come
+    /// back, and the next loss of the direct path would then end the connection instead
+    /// of moving it to the relay.
+    fn reprobe_paths(&mut self) {
         if self
             .connections
             .values()
@@ -989,12 +995,41 @@ impl RemoteStateActor {
             trace!("a connection has no direct path, triggering holepunching");
             self.trigger_holepunching();
         }
+
+        let relays: Vec<_> = self
+            .state
+            .paths
+            .addrs()
+            .filter(|addr| addr.is_relay())
+            .map(|addr| transports::FourTuple::from_remote(addr.clone()))
+            .collect();
+        if relays.is_empty() {
+            return;
+        }
+        for (conn_id, conn_state) in self.connections.iter() {
+            if has_relay_path(&conn_state.paths) {
+                continue;
+            }
+            let Some(conn) = conn_state.handle.upgrade() else {
+                continue;
+            };
+            for open_addr in &relays {
+                trace!(%conn_id, ?open_addr, "connection has no relay path, reopening");
+                self.state
+                    .open_path_on_conn(*conn_id, conn_state, &conn, open_addr);
+            }
+        }
     }
 }
 
 /// Whether any of a connection's open paths is a direct IP path.
 fn has_ip_path(paths: &FxHashMap<PathId, transports::FourTuple>) -> bool {
     paths.values().any(|addr| addr.is_ip())
+}
+
+/// Whether any of a connection's open paths is a relay path.
+fn has_relay_path(paths: &FxHashMap<PathId, transports::FourTuple>) -> bool {
+    paths.values().any(|addr| addr.is_relay())
 }
 
 impl State {
@@ -1847,6 +1882,19 @@ mod tests {
             (2, ip_path(1000, None))
         ])));
         assert!(!has_ip_path(&tracked([])));
+    }
+
+    #[test]
+    fn has_relay_path_ignores_ip_paths() {
+        let relay = transports::FourTuple::from_remote(transports::Addr::Relay(
+            "https://relay.invalid".parse().unwrap(),
+            EndpointId::from_bytes(&[1u8; 32]).unwrap(),
+        ));
+        assert!(!has_relay_path(&tracked([(1, ip_path(1000, None))])));
+        assert!(has_relay_path(&tracked([
+            (1, relay),
+            (2, ip_path(1000, None))
+        ])));
     }
 
     #[test]
