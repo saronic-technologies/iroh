@@ -183,6 +183,14 @@ impl RemotePathState {
         self.paths.keys()
     }
 
+    /// Returns the addresses of all paths that are open or were open once.
+    pub(super) fn once_open_addrs(&self) -> impl Iterator<Item = &transports::Addr> {
+        self.paths
+            .iter()
+            .filter(|(_, state)| matches!(state.status, PathStatus::Open | PathStatus::Inactive(_)))
+            .map(|(addr, _)| addr)
+    }
+
     /// Returns whether this stores any addresses.
     pub(super) fn is_empty(&self) -> bool {
         self.paths.is_empty()
@@ -337,6 +345,20 @@ mod tests {
             sources: HashMap::new(),
             status: PathStatus::Unusable,
         }
+    }
+
+    #[test]
+    fn once_open_addrs_skips_never_opened_and_unusable_paths() {
+        let mut paths = RemotePathState::new(Default::default());
+        paths.insert_open_path(ip_addr(1), Source::App);
+        paths.insert_open_path(ip_addr(2), Source::App);
+        paths.abandoned_path(&ip_addr(2));
+        paths.paths.insert(ip_addr(3), path_state_unusable());
+        paths.paths.insert(ip_addr(4), PathState::default());
+
+        let mut once_open: Vec<_> = paths.once_open_addrs().cloned().collect();
+        once_open.sort();
+        assert_eq!(once_open, vec![ip_addr(1), ip_addr(2)]);
     }
 
     #[test]

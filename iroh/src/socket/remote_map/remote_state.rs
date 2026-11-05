@@ -51,6 +51,15 @@ mod remote_info;
 /// If there have been no changes to the NAT address candidates, holepunching will not be
 /// attempted more frequently than at this interval.
 const HOLEPUNCH_ATTEMPTS_INTERVAL: Duration = Duration::from_secs(5);
+/// Number of consecutive [`HOLEPUNCH_ATTEMPTS_INTERVAL`] re-probe ticks that run at full rate.
+///
+/// A path that is still missing after this many ticks is most likely gone for good, e.g.
+/// the remote only has a relay path or the relay is unreachable from this network, so
+/// re-probing then slows down to every [`REPROBE_SLOW_EVERY`] ticks. A network change or
+/// the path coming back resets the count.
+const REPROBE_FAST_ATTEMPTS: u32 = 12;
+/// Once past [`REPROBE_FAST_ATTEMPTS`], re-probe only every this many ticks.
+const REPROBE_SLOW_EVERY: u32 = 6;
 
 /// The latency at or under which we don't try to upgrade to a better path.
 const GOOD_ENOUGH_LATENCY: Duration = Duration::from_millis(10);
@@ -162,6 +171,10 @@ struct State {
     ///
     /// They failed to open because we did not have enough CIDs issued by the remote.
     pending_open_paths: VecDeque<transports::FourTuple>,
+    /// Consecutive re-probe ticks on which a connection lacked a direct path.
+    ip_reprobe_attempts: u32,
+    /// Consecutive re-probe ticks on which a connection lacked a relay path.
+    relay_reprobe_attempts: u32,
 
     // Internal state - address lookup
     //
@@ -201,6 +214,8 @@ impl RemoteStateActor {
                 scheduled_holepunch: None,
                 scheduled_open_path: None,
                 pending_open_paths: VecDeque::new(),
+                ip_reprobe_attempts: 0,
+                relay_reprobe_attempts: 0,
                 address_lookup_stream: None,
                 path_selector,
             },
@@ -254,7 +269,12 @@ impl RemoteStateActor {
         let check_connections = time::interval(UPGRADE_INTERVAL);
         n0_future::pin!(check_connections);
 
-        let reprobe = time::interval(HOLEPUNCH_ATTEMPTS_INTERVAL);
+        // The first tick is delayed: a fresh connection opens its paths itself.
+        let mut reprobe = time::interval_at(
+            Instant::now() + HOLEPUNCH_ATTEMPTS_INTERVAL,
+            HOLEPUNCH_ATTEMPTS_INTERVAL,
+        );
+        reprobe.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
         n0_future::pin!(reprobe);
 
         loop {
@@ -476,6 +496,8 @@ impl RemoteStateActor {
             }
         }
 
+        self.state.ip_reprobe_attempts = 0;
+        self.state.relay_reprobe_attempts = 0;
         if is_major {
             self.trigger_holepunching();
         }
@@ -991,9 +1013,30 @@ impl RemoteStateActor {
             .connections
             .values()
             .any(|conn_state| !has_ip_path(&conn_state.paths));
-        if missing_ip_path {
+        let missing_relay_path = self
+            .connections
+            .values()
+            .any(|conn_state| !has_relay_path(&conn_state.paths));
+        let probe_ip = missing_ip_path && {
+            self.state.ip_reprobe_attempts += 1;
+            reprobe_due(self.state.ip_reprobe_attempts)
+        };
+        let probe_relay = missing_relay_path && {
+            self.state.relay_reprobe_attempts += 1;
+            reprobe_due(self.state.relay_reprobe_attempts)
+        };
+        if !missing_ip_path {
+            self.state.ip_reprobe_attempts = 0;
+        }
+        if !missing_relay_path {
+            self.state.relay_reprobe_attempts = 0;
+        }
+        if probe_ip {
             trace!("a connection has no direct path, triggering holepunching");
             self.trigger_holepunching();
+        }
+        if !probe_ip && !probe_relay {
+            return;
         }
 
         // Holepunching needs a live path to carry its frames, which a connection on a
@@ -1002,14 +1045,18 @@ impl RemoteStateActor {
         // is what brings a connection back when the remote keeps sending on a link that
         // died while the local side was sending on one that did not: the local path
         // starves of acknowledgements and times out although the link is up.
+        //
+        // Only addresses that once carried an open path are reopened. Addresses that never
+        // validated are holepunching's job; reopening them would probe every address an
+        // address lookup ever reported, including ones of the wrong IP family.
         let local_addrs = self.state.local_candidates();
         let reopen: Vec<_> = self
             .state
             .paths
-            .addrs()
+            .once_open_addrs()
             .filter(|addr| {
-                addr.is_relay()
-                    || (missing_ip_path
+                (probe_relay && addr.is_relay())
+                    || (probe_ip
                         && matches!(addr, transports::Addr::Ip(sockaddr) if !local_addrs.contains(sockaddr)))
             })
             .map(|addr| transports::FourTuple::from_remote(addr.clone()))
@@ -1036,6 +1083,14 @@ impl RemoteStateActor {
             }
         }
     }
+}
+
+/// Whether the `attempt`-th consecutive re-probe tick should probe.
+///
+/// Every tick up to [`REPROBE_FAST_ATTEMPTS`] probes, after that only every
+/// [`REPROBE_SLOW_EVERY`]-th tick does.
+fn reprobe_due(attempt: u32) -> bool {
+    attempt <= REPROBE_FAST_ATTEMPTS || attempt.is_multiple_of(REPROBE_SLOW_EVERY)
 }
 
 /// Whether any of a connection's open paths is a direct IP path.
@@ -1336,7 +1391,9 @@ impl State {
                     | Some(Err(PathError::MaxPathIdReached)) => {
                         self.scheduled_open_path =
                             Some(Instant::now() + Duration::from_millis(333));
-                        self.pending_open_paths.push_back(open_addr.clone());
+                        if !self.pending_open_paths.contains(open_addr) {
+                            self.pending_open_paths.push_back(open_addr.clone());
+                        }
                         trace!(?open_addr, ?ret, "scheduling open_path");
                     }
                     _ => warn!(?ret, "Opening path failed"),
@@ -1898,6 +1955,20 @@ mod tests {
             (2, ip_path(1000, None))
         ])));
         assert!(!has_ip_path(&tracked([])));
+    }
+
+    #[test]
+    fn reprobe_slows_down_after_the_fast_window() {
+        assert!((1..=REPROBE_FAST_ATTEMPTS).all(reprobe_due));
+        let slow: Vec<_> = (REPROBE_FAST_ATTEMPTS + 1
+            ..=REPROBE_FAST_ATTEMPTS + 2 * REPROBE_SLOW_EVERY)
+            .filter(|attempt| reprobe_due(*attempt))
+            .collect();
+        assert_eq!(slow.len(), 2);
+        assert!(
+            slow.iter()
+                .all(|attempt| attempt.is_multiple_of(REPROBE_SLOW_EVERY))
+        );
     }
 
     #[test]

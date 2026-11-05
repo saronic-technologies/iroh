@@ -184,6 +184,17 @@ enum ActiveRelayPrioMessage {
     HasEndpointRoute(EndpointId, oneshot::Sender<bool>),
 }
 
+/// How a reconnect backoff delay ended.
+#[derive(Debug, PartialEq, Eq)]
+enum BackoffEnd {
+    /// The whole delay passed.
+    Elapsed,
+    /// Cut short by a network change or by becoming the home relay.
+    Woken,
+    /// The actor should shut down instead of retrying.
+    Shutdown,
+}
+
 /// Configuration needed to start an [`ActiveRelayActor`].
 #[derive(Debug)]
 struct ActiveRelayActorOptions {
@@ -322,6 +333,9 @@ impl ActiveRelayActor {
     /// Primarily switches between the dialing and connected states.
     async fn run(mut self) {
         let mut backoff = Self::build_backoff();
+        // A delay cut short by a network change is used again on the next failure, so
+        // repeated network changes do not walk the backoff up to its maximum.
+        let mut woken_delay = None;
 
         while let Err(err) = self.run_once().await {
             warn!("{err:#}");
@@ -332,18 +346,21 @@ impl ActiveRelayActor {
             if !was_established {
                 // If dialing failed, or if the relay connection failed before we received a pong,
                 // we wait an exponentially increasing time until we attempt to reconnect again.
-                let Some(delay) = backoff.next() else {
+                let Some(delay) = woken_delay.take().or_else(|| backoff.next()) else {
                     warn!("retries exceeded");
                     break;
                 };
                 debug!("retry in {delay:?}");
-                if !self.sleep_backoff(delay).await {
-                    break;
+                match self.sleep_backoff(delay).await {
+                    BackoffEnd::Elapsed => {}
+                    BackoffEnd::Woken => woken_delay = Some(delay),
+                    BackoffEnd::Shutdown => break,
                 }
             } else {
                 // If the relay connection remained established long enough so that we received a pong
                 // from the relay server, we reset the backoff and attempt to reconnect immediately.
                 backoff = Self::build_backoff();
+                woken_delay = None;
             }
         }
         debug!("exiting");
@@ -369,9 +386,7 @@ impl ActiveRelayActor {
     /// itself is kept, so a relay that is dead for its own reasons is tried once more per
     /// network change and then waits as long as before. Becoming the home relay ends the
     /// wait for the same reason.
-    ///
-    /// Returns `false` if the actor should shut down instead of retrying.
-    async fn sleep_backoff(&mut self, delay: Duration) -> bool {
+    async fn sleep_backoff(&mut self, delay: Duration) -> BackoffEnd {
         let sleep = time::sleep(delay);
         tokio::pin!(sleep);
         let mut logged = false;
@@ -380,12 +395,12 @@ impl ActiveRelayActor {
                 biased;
                 _ = self.stop_token.cancelled() => {
                     debug!("Shutdown.");
-                    return false;
+                    return BackoffEnd::Shutdown;
                 }
                 msg = self.prio_inbox.recv() => {
                     let Some(msg) = msg else {
                         warn!("Priority inbox closed, shutdown.");
-                        return false;
+                        return BackoffEnd::Shutdown;
                     };
                     match msg {
                         ActiveRelayPrioMessage::HasEndpointRoute(_peer, sender) => {
@@ -396,18 +411,18 @@ impl ActiveRelayActor {
                 msg = self.inbox.recv() => {
                     let Some(msg) = msg else {
                         debug!("Inbox closed, shutdown.");
-                        return false;
+                        return BackoffEnd::Shutdown;
                     };
                     match msg {
                         ActiveRelayMessage::CheckConnection { .. } => {
                             debug!("Network changed, retrying before the backoff elapsed.");
-                            return true;
+                            return BackoffEnd::Woken;
                         }
                         ActiveRelayMessage::SetHomeRelay(is_home) => {
                             self.set_home_relay(is_home);
                             if is_home {
                                 debug!("Became home relay, retrying before the backoff elapsed.");
-                                return true;
+                                return BackoffEnd::Woken;
                             }
                         }
                         #[cfg(test)]
@@ -423,14 +438,14 @@ impl ActiveRelayActor {
                 item = self.relay_datagrams_send.recv() => {
                     if item.is_none() {
                         warn!("Datagram inbox closed, shutdown.");
-                        return false;
+                        return BackoffEnd::Shutdown;
                     }
                     if !logged {
                         debug!("Dropping datagrams to send while backing off.");
                         logged = true;
                     }
                 }
-                _ = &mut sleep => return true,
+                _ = &mut sleep => return BackoffEnd::Elapsed,
             }
         }
     }
@@ -1493,8 +1508,8 @@ mod tests {
 
     use super::{
         ActiveRelayActor, ActiveRelayActorOptions, ActiveRelayMessage, ActiveRelayPrioMessage,
-        RELAY_INACTIVE_CLEANUP_TIME, RelayConnectionOptions, RelayRecvDatagram, RelaySendItem,
-        UNDELIVERABLE_DATAGRAM_TIMEOUT,
+        BackoffEnd, RELAY_INACTIVE_CLEANUP_TIME, RelayConnectionOptions, RelayRecvDatagram,
+        RelaySendItem, UNDELIVERABLE_DATAGRAM_TIMEOUT,
     };
     use crate::{dns::DnsResolver, test_utils};
 
@@ -1890,7 +1905,11 @@ mod tests {
 
         // The backoff itself still runs to completion.
         let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
-        assert!(keep_running, "backoff should complete normally");
+        assert_eq!(
+            keep_running,
+            BackoffEnd::Elapsed,
+            "backoff should complete normally"
+        );
     }
 
     #[tokio::test]
@@ -1948,7 +1967,11 @@ mod tests {
         }
 
         let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
-        assert!(keep_running, "backoff should complete normally");
+        assert_eq!(
+            keep_running,
+            BackoffEnd::Elapsed,
+            "backoff should complete normally"
+        );
     }
 
     #[tokio::test]
@@ -2000,8 +2023,9 @@ mod tests {
             .await
             .expect("backoff did not end on the network change")
             .expect("backoff task panicked");
-        assert!(
+        assert_eq!(
             keep_running,
+            BackoffEnd::Woken,
             "a network change retries, it does not shut down"
         );
     }
