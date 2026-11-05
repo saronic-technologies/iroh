@@ -987,34 +987,50 @@ impl RemoteStateActor {
     /// back, and the next loss of the direct path would then end the connection instead
     /// of moving it to the relay.
     fn reprobe_paths(&mut self) {
-        if self
+        let missing_ip_path = self
             .connections
             .values()
-            .any(|conn_state| !has_ip_path(&conn_state.paths))
-        {
+            .any(|conn_state| !has_ip_path(&conn_state.paths));
+        if missing_ip_path {
             trace!("a connection has no direct path, triggering holepunching");
             self.trigger_holepunching();
         }
 
-        let relays: Vec<_> = self
+        // Holepunching needs a live path to carry its frames, which a connection on a
+        // dead relay path does not have. Opening a path to a known remote address needs
+        // none: the challenge travels on the new path and the remote answers on it. This
+        // is what brings a connection back when the remote keeps sending on a link that
+        // died while the local side was sending on one that did not: the local path
+        // starves of acknowledgements and times out although the link is up.
+        let local_addrs = self.state.local_candidates();
+        let reopen: Vec<_> = self
             .state
             .paths
             .addrs()
-            .filter(|addr| addr.is_relay())
+            .filter(|addr| {
+                addr.is_relay()
+                    || (missing_ip_path
+                        && matches!(addr, transports::Addr::Ip(sockaddr) if !local_addrs.contains(sockaddr)))
+            })
             .map(|addr| transports::FourTuple::from_remote(addr.clone()))
             .collect();
-        if relays.is_empty() {
+        if reopen.is_empty() {
             return;
         }
         for (conn_id, conn_state) in self.connections.iter() {
-            if has_relay_path(&conn_state.paths) {
-                continue;
-            }
             let Some(conn) = conn_state.handle.upgrade() else {
                 continue;
             };
-            for open_addr in &relays {
-                trace!(%conn_id, ?open_addr, "connection has no relay path, reopening");
+            for open_addr in &reopen {
+                let wanted = if open_addr.is_relay() {
+                    !has_relay_path(&conn_state.paths)
+                } else {
+                    !has_ip_path(&conn_state.paths)
+                };
+                if !wanted {
+                    continue;
+                }
+                trace!(%conn_id, ?open_addr, "connection lacks this kind of path, reopening");
                 self.state
                     .open_path_on_conn(*conn_id, conn_state, &conn, open_addr);
             }
